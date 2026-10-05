@@ -1,0 +1,24 @@
+{
+  "name": "everactive-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "EverActive API (Express + Prisma + MySQL)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "jest"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.5",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "jest": "^30.5.2",
+    "nodemon": "^3.1.14",
+    "supertest": "^7.3.1"
+  }
+}
