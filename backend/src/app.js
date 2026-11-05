@@ -1,5 +1,8 @@
 const express = require('express');
 const authRoutes = require('./routes/auth');
+const profileRoutes = require('./routes/profile');
+const planRoutes = require('./routes/plans');
+const adminRoutes = require('./routes/admin');
 
 const app = express();
 // Railway puts one proxy in front of the app; this makes req.ip the real client IP for rate limiting
@@ -13,6 +16,10 @@ app.get('/api/health', (req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
+app.use('/api/plans', planRoutes);
+app.use('/api/admin', adminRoutes);
+// /api/interests and /api/preferences
+app.use('/api', profileRoutes);
 
 app.use('/api', (req, res) => {
   res.status(404).json({ message: 'Not found.' });
