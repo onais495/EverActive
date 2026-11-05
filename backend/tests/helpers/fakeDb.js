@@ -18,8 +18,14 @@ const MODELS = {
     unique: [['userId', 'name']],
   },
   eventSource: {
-    defaults: () => ({ isActive: true, metroArea: 'NYC', lastSyncedAt: null, createdAt: new Date() }),
-    unique: [['eventbriteOrgId']],
+    defaults: () => ({
+      isActive: true,
+      metroArea: 'NYC',
+      eventbriteOrganizerId: null,
+      lastSyncedAt: null,
+      createdAt: new Date(),
+    }),
+    unique: [['eventbriteVenueId', 'eventbriteOrganizerId']],
   },
   event: {
     defaults: () => ({ description: '', isFree: false, metroArea: 'NYC', createdAt: new Date() }),

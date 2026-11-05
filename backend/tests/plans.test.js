@@ -95,6 +95,20 @@ describe('POST /api/plans/current/generate (US004)', () => {
     expect(gemini.generateJson).not.toHaveBeenCalled();
   });
 
+  test('a recurring event is offered once, so it cannot crowd out other events', async () => {
+    const { auth } = await signUp();
+    for (let i = 0; i < 45; i++) {
+      await seedEvent({ title: 'Gallery free admission', category: 'Solo', startsAt: new Date(Date.now() + (i + 1) * HOUR) });
+    }
+    await seedEvent({ title: 'Evening lecture', category: 'Intellectual', startsAt: new Date(Date.now() + 100 * HOUR) });
+    gemini.generateJson.mockRejectedValue(new Error('down'));
+
+    await request(app).post('/api/plans/current/generate').set(auth);
+    const { input } = gemini.generateJson.mock.calls[0][0];
+    const titles = JSON.parse(input.match(/CANDIDATE_EVENTS: (.*)/)[1]).map((c) => c.title);
+    expect(titles).toEqual(['Gallery free admission', 'Evening lecture']);
+  });
+
   test('regenerating replaces suggestions instead of piling them up', async () => {
     const { auth, user } = await signUp();
     await seedMixedWeek();

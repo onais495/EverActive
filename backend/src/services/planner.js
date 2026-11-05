@@ -74,7 +74,17 @@ async function loadInputs(user, now) {
 
   // Never suggest an event the user already removed
   const removedIds = new Set(history.filter((h) => h.status === 'REMOVED').map((h) => h.eventId));
-  const candidates = events.filter((e) => !removedIds.has(e.id)).slice(0, MAX_CANDIDATES);
+  // Recurring events come back as one event per date (e.g. a gallery's 134 "free admission" days).
+  // Keep only the soonest of each, so one series can't fill the plan or crowd out everything else.
+  const seenTitles = new Set();
+  const candidates = events
+    .filter((e) => {
+      const title = e.title.trim().toLowerCase();
+      if (removedIds.has(e.id) || seenTitles.has(title)) return false;
+      seenTitles.add(title);
+      return true;
+    })
+    .slice(0, MAX_CANDIDATES);
 
   return { interests, history, candidates };
 }

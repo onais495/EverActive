@@ -9,38 +9,48 @@ const { ACTIVITY_TYPES } = require('../constants');
 const router = express.Router();
 router.use(requireAuth, requireRole('ADMIN'));
 
-// GET /api/admin/event-sources: the curated Eventbrite organizations
+// GET /api/admin/event-sources: the curated Eventbrite venues
 router.get('/event-sources', async (req, res) => {
   const sources = await prisma.eventSource.findMany({ orderBy: { createdAt: 'asc' } });
   res.json({ sources });
 });
 
-// POST /api/admin/event-sources: add an organization by its ID, or by any one of its event IDs
-// (copied from the end of an Eventbrite event URL), in which case Eventbrite tells us the organization
+// POST /api/admin/event-sources: add a source by pasting any event ID (the number at the end of
+// an Eventbrite event URL). We store that event's venue and organizer, so syncs pick up that
+// organizer's events at that venue. Passing venueId instead takes every public event at the venue.
 router.post('/event-sources', async (req, res) => {
   const { errors, data } = validateEventSource(req.body || {});
   if (errors) return res.status(400).json({ message: errors[0], errors });
 
-  let organizationId = data.organizationId;
-  if (!organizationId) {
+  let venueId = data.venueId;
+  let organizerId = null;
+  if (data.eventId) {
+    let event;
     try {
-      const event = await eventbrite.getEvent(data.eventId);
-      organizationId = event.organization_id && String(event.organization_id);
+      event = await eventbrite.getEvent(data.eventId);
     } catch (err) {
       console.warn('Eventbrite lookup failed:', err.message);
-    }
-    if (!organizationId) {
       return res.status(400).json({ message: 'Couldn’t find that event on Eventbrite. Check the event ID.' });
     }
+    if (event.online_event || !event.venue_id) {
+      return res.status(400).json({ message: 'That event is online-only, so it has no venue to follow.' });
+    }
+    venueId = String(event.venue_id);
+    organizerId = event.organizer_id ? String(event.organizer_id) : null;
   }
 
   try {
     const source = await prisma.eventSource.create({
-      data: { name: data.name, defaultCategory: data.defaultCategory, eventbriteOrgId: organizationId },
+      data: {
+        name: data.name,
+        defaultCategory: data.defaultCategory,
+        eventbriteVenueId: venueId,
+        eventbriteOrganizerId: organizerId,
+      },
     });
     res.status(201).json({ source });
   } catch (err) {
-    if (err.code === 'P2002') return res.status(409).json({ message: 'That organization is already a source.' });
+    if (err.code === 'P2002') return res.status(409).json({ message: 'That venue and organizer are already a source.' });
     throw err;
   }
 });

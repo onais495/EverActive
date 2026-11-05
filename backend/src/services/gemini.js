@@ -1,19 +1,24 @@
 // Minimal Gemini client (Interactions API) that returns parsed JSON matching a schema
 const URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const API_REVISION = '2026-05-20';
-const DEFAULT_MODEL = 'gemini-3.8-flash';
+// Free tier, fast, and less often overloaded than gemini-3.8-flash. Override with GEMINI_MODEL.
+const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 // Leaves room inside the SRS's 10-second plan generation budget
 const REQUEST_TIMEOUT_MS = 8_000;
 
 class GeminiError extends Error {}
 
-// The REST response puts the text in output_text; fall back to the outputs list just in case
+// The REST response lists steps (e.g. a hidden "thought", then "model_output");
+// the answer is the text content of the model_output step(s)
 function extractText(body) {
-  if (typeof body.output_text === 'string') return body.output_text;
-  for (const output of body.outputs || []) {
-    if (typeof output.text === 'string') return output.text;
-  }
-  throw new GeminiError('Gemini response had no text output.');
+  const text = (body.steps || [])
+    .filter((step) => step.type === 'model_output')
+    .flatMap((step) => step.content || [])
+    .filter((part) => part.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('');
+  if (!text) throw new GeminiError('Gemini response had no text output.');
+  return text;
 }
 
 async function generateJson({ input, schema }) {
@@ -44,4 +49,4 @@ async function generateJson({ input, schema }) {
   }
 }
 
-module.exports = { generateJson, GeminiError };
+module.exports = { generateJson, extractText, GeminiError };

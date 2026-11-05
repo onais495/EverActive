@@ -1,7 +1,9 @@
-// Thin client for the three Eventbrite endpoints that still exist after search was removed.
+// Thin client for the Eventbrite endpoints that still exist after search was removed.
+// Listing by organization only works for organizations you belong to (HTTP 403 otherwise),
+// so sources are venues: listing a venue's public events works for anyone.
 const BASE_URL = 'https://www.eventbriteapi.com/v3';
 const REQUEST_TIMEOUT_MS = 10_000;
-// Safety cap so one huge organization can't stall the sync
+// Safety cap so one busy venue can't stall the sync
 const MAX_PAGES = 10;
 
 class EventbriteError extends Error {}
@@ -23,26 +25,26 @@ async function request(path, params = {}) {
   return res.json();
 }
 
-// Used once per new source: look up a sample event to find its organization
+// Used once per new source: look up a sample event to find its venue and organizer
 async function getEvent(eventId) {
   return request(`/events/${encodeURIComponent(eventId)}/`);
 }
 
-// All live, upcoming events for an organization, with venue details included
-async function listOrganizationEvents(organizationId) {
+// All live, public events at a venue, with venue details included
+async function listVenueEvents(venueId) {
   const events = [];
   let continuation;
 
   for (let page = 0; page < MAX_PAGES; page++) {
     const params = {
       status: 'live',
-      time_filter: 'current_future',
+      only_public: 'true',
       order_by: 'start_asc',
       expand: 'venue',
     };
     if (continuation) params.continuation = continuation;
 
-    const body = await request(`/organizations/${encodeURIComponent(organizationId)}/events/`, params);
+    const body = await request(`/venues/${encodeURIComponent(venueId)}/events/`, params);
     events.push(...(body.events || []));
 
     if (!body.pagination || !body.pagination.has_more_items) break;
@@ -52,4 +54,4 @@ async function listOrganizationEvents(organizationId) {
   return events;
 }
 
-module.exports = { getEvent, listOrganizationEvents, EventbriteError };
+module.exports = { getEvent, listVenueEvents, EventbriteError };

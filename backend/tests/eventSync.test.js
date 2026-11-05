@@ -40,6 +40,12 @@ describe('toCachedEvent: NYC filtering', () => {
     });
   });
 
+  test('keeps only the source organizer’s events when one is set', () => {
+    const narrowed = { ...source, eventbriteOrganizerId: '42' };
+    expect(toCachedEvent(rawEvent({ organizer_id: '42' }), narrowed, now)).not.toBeNull();
+    expect(toCachedEvent(rawEvent({ organizer_id: '99' }), narrowed, now)).toBeNull();
+  });
+
   test.each([
     ['online events', { online_event: true }],
     ['events with no venue', { venue: null }],
@@ -55,7 +61,7 @@ describe('toCachedEvent: NYC filtering', () => {
 describe('admin event sources and sync', () => {
   let admin;
   beforeEach(async () => {
-    eventbrite.listOrganizationEvents.mockReset();
+    eventbrite.listVenueEvents.mockReset();
     eventbrite.getEvent.mockReset();
     admin = await signUp({ role: 'ADMIN' });
   });
@@ -66,26 +72,39 @@ describe('admin event sources and sync', () => {
     expect((await request(app).post('/api/admin/event-sync').set(auth)).statusCode).toBe(403);
   });
 
-  test('adds a source from a sample event ID by looking up its organization', async () => {
-    eventbrite.getEvent.mockResolvedValue({ id: '555', organization_id: '777' });
+  test('adds a source from a sample event ID by looking up its venue and organizer', async () => {
+    eventbrite.getEvent.mockResolvedValue({ id: '555', venue_id: '777', organizer_id: '42', online_event: false });
     const res = await request(app)
       .post('/api/admin/event-sources')
       .set(admin.auth)
       .send({ name: 'Museum Talks', defaultCategory: 'Intellectual', eventId: '555' });
 
     expect(res.statusCode).toBe(201);
-    expect(res.body.source).toMatchObject({ eventbriteOrgId: '777', defaultCategory: 'Intellectual' });
+    expect(res.body.source).toMatchObject({
+      eventbriteVenueId: '777',
+      eventbriteOrganizerId: '42',
+      defaultCategory: 'Intellectual',
+    });
+  });
+
+  test('rejects online-only sample events', async () => {
+    eventbrite.getEvent.mockResolvedValue({ id: '555', venue_id: null, online_event: true });
+    const res = await request(app)
+      .post('/api/admin/event-sources')
+      .set(admin.auth)
+      .send({ name: 'Webinars', defaultCategory: 'Intellectual', eventId: '555' });
+    expect(res.statusCode).toBe(400);
   });
 
   test('rejects duplicates and bad input', async () => {
-    const body = { name: 'Jazz Club', defaultCategory: 'Social', organizationId: '123' };
+    const body = { name: 'Jazz Club', defaultCategory: 'Social', venueId: '123' };
     expect((await request(app).post('/api/admin/event-sources').set(admin.auth).send(body)).statusCode).toBe(201);
     expect((await request(app).post('/api/admin/event-sources').set(admin.auth).send(body)).statusCode).toBe(409);
 
     const bad = [
-      { ...body, organizationId: '12; DROP TABLE' },
+      { ...body, venueId: '12; DROP TABLE' },
       { ...body, defaultCategory: 'Party' },
-      { name: 'Both IDs', defaultCategory: 'Social', organizationId: '1', eventId: '2' },
+      { name: 'Both IDs', defaultCategory: 'Social', venueId: '1', eventId: '2' },
     ];
     for (const b of bad) {
       expect((await request(app).post('/api/admin/event-sources').set(admin.auth).send(b)).statusCode).toBe(400);
@@ -94,10 +113,10 @@ describe('admin event sources and sync', () => {
 
   test('sync caches filtered events, updates existing ones, and survives a failing source', async () => {
     const warn = jest.spyOn(console, 'error').mockImplementation(() => {});
-    await fakeDb.eventSource.create({ data: { name: 'Museum Talks', eventbriteOrgId: '777', defaultCategory: 'Intellectual' } });
-    await fakeDb.eventSource.create({ data: { name: 'Broken Org', eventbriteOrgId: '888', defaultCategory: 'Social' } });
-    eventbrite.listOrganizationEvents.mockImplementation(async (orgId) => {
-      if (orgId === '888') throw new Error('HTTP 404');
+    await fakeDb.eventSource.create({ data: { name: 'Museum Talks', eventbriteVenueId: '777', defaultCategory: 'Intellectual' } });
+    await fakeDb.eventSource.create({ data: { name: 'Broken Venue', eventbriteVenueId: '888', defaultCategory: 'Social' } });
+    eventbrite.listVenueEvents.mockImplementation(async (venueId) => {
+      if (venueId === '888') throw new Error('HTTP 404');
       return [rawEvent(), rawEvent({ id: '1002', online_event: true })];
     });
 
@@ -105,12 +124,12 @@ describe('admin event sources and sync', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body.results).toEqual([
       expect.objectContaining({ name: 'Museum Talks', fetched: 2, saved: 1 }),
-      expect.objectContaining({ name: 'Broken Org', error: 'HTTP 404' }),
+      expect.objectContaining({ name: 'Broken Venue', error: 'HTTP 404' }),
     ]);
     expect(fakeDb.events).toHaveLength(1);
 
     // A second sync updates the cached event instead of duplicating it
-    eventbrite.listOrganizationEvents.mockResolvedValue([rawEvent({ name: { text: 'Renamed lecture' } })]);
+    eventbrite.listVenueEvents.mockResolvedValue([rawEvent({ name: { text: 'Renamed lecture' } })]);
     res = await request(app).post('/api/admin/event-sync').set(admin.auth);
     expect(fakeDb.events).toHaveLength(1);
     expect(fakeDb.events[0].title).toBe('Renamed lecture');
@@ -121,7 +140,7 @@ describe('admin event sources and sync', () => {
     const created = await request(app)
       .post('/api/admin/event-sources')
       .set(admin.auth)
-      .send({ name: 'Jazz Club', defaultCategory: 'Social', organizationId: '123' });
+      .send({ name: 'Jazz Club', defaultCategory: 'Social', venueId: '123' });
     const res = await request(app)
       .patch(`/api/admin/event-sources/${created.body.source.id}`)
       .set(admin.auth)

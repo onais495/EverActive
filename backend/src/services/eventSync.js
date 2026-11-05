@@ -15,6 +15,8 @@ function toCachedEvent(raw, source, now) {
   const metro = METRO_AREAS[source.metroArea];
   const address = raw.venue && raw.venue.address;
   if (raw.online_event || !address || !metro) return null;
+  // A venue can host anything; when the source names an organizer, keep only their events
+  if (source.eventbriteOrganizerId && String(raw.organizer_id) !== source.eventbriteOrganizerId) return null;
 
   const lat = Number(address.latitude);
   const lng = Number(address.longitude);
@@ -44,7 +46,7 @@ function toCachedEvent(raw, source, now) {
 }
 
 async function syncSource(source, now = new Date()) {
-  const rawEvents = await eventbrite.listOrganizationEvents(source.eventbriteOrgId);
+  const rawEvents = await eventbrite.listVenueEvents(source.eventbriteVenueId);
   let saved = 0;
 
   for (const raw of rawEvents) {

@@ -10,7 +10,7 @@ Names must match exactly; the tests use an in-memory stand-in (`tests/helpers/fa
 | Interest | `Interest` |
 | Activity | `Event` (a cached Eventbrite event) |
 | ActivityStatus | `PlanItem` (an event in a user's weekly plan, with its status) |
-| — (new) | `EventSource` (curated Eventbrite organizations) |
+| — (new) | `EventSource` (curated Eventbrite venue, optionally narrowed to one organizer) |
 
 ```prisma
 enum Role {
@@ -72,13 +72,15 @@ model Interest {
 model EventSource {
   id              Int          @id @default(autoincrement())
   name            String       @db.VarChar(100)
-  eventbriteOrgId String       @unique @db.VarChar(20)
+  eventbriteVenueId     String  @db.VarChar(20)
+  eventbriteOrganizerId String? @db.VarChar(20)  // null = every public event at the venue
   defaultCategory ActivityType
   metroArea       String       @default("NYC") @db.VarChar(20)
   isActive        Boolean      @default(true)
   lastSyncedAt    DateTime?
   createdAt       DateTime     @default(now())
   events          Event[]
+  @@unique([eventbriteVenueId, eventbriteOrganizerId])
 }
 
 model Event {

@@ -165,25 +165,25 @@ function validatePreferences(body) {
 
 const EVENTBRITE_ID_PATTERN = /^\d{1,20}$/;
 
-// Body: { name, defaultCategory, organizationId? , eventId? } — one of the two IDs is required
+// Body: { name, defaultCategory, venueId? , eventId? } — one of the two IDs is required
 function validateEventSource(body) {
-  const { name, defaultCategory, organizationId, eventId } = body;
+  const { name, defaultCategory, venueId, eventId } = body;
   const errors = [];
 
   if (!isNonEmptyString(name) || name.trim().length > 100) errors.push('Please give the source a name.');
   if (!ACTIVITY_TYPES.includes(defaultCategory)) {
     errors.push(`Category must be one of: ${ACTIVITY_TYPES.join(', ')}.`);
   }
-  const orgId = organizationId === undefined ? undefined : String(organizationId);
+  const venue = venueId === undefined ? undefined : String(venueId);
   const sampleEventId = eventId === undefined ? undefined : String(eventId);
-  if ((orgId === undefined) === (sampleEventId === undefined)) {
-    errors.push('Provide either organizationId or eventId.');
-  } else if (!EVENTBRITE_ID_PATTERN.test(orgId ?? sampleEventId)) {
+  if ((venue === undefined) === (sampleEventId === undefined)) {
+    errors.push('Provide either venueId or eventId.');
+  } else if (!EVENTBRITE_ID_PATTERN.test(venue ?? sampleEventId)) {
     errors.push('Eventbrite IDs are numbers only.');
   }
 
   if (errors.length > 0) return { errors };
-  return { data: { name: name.trim(), defaultCategory, organizationId: orgId, eventId: sampleEventId } };
+  return { data: { name: name.trim(), defaultCategory, venueId: venue, eventId: sampleEventId } };
 }
 
 module.exports = {
