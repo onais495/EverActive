@@ -18,6 +18,7 @@ const SESSION_USER_FIELDS = {
   role: true,
   isActive: true,
   metroArea: true,
+  activityTypes: true,
 };
 
 // Only the hash is stored, so a leaked database can't be used to log in as anyone

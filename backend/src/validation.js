@@ -1,4 +1,6 @@
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const { ACTIVITY_TYPES, INTEREST_OPTIONS, METRO_AREAS } = require('./constants');
+
+const EMAIL_PATTERN =/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const NAME_MAX_LENGTH = 50;
 const MIN_AGE = 18;
@@ -95,4 +97,99 @@ function validateRegistration(body) {
   };
 }
 
-module.exports = { validateRegistration, normalizeEmail };
+const MAX_CUSTOM_INTERESTS = 10;
+const CUSTOM_INTEREST_MAX_LENGTH = 40;
+// Letters (any language), numbers, spaces and light punctuation. Free text ends up in the
+// LLM prompt, so anything that looks like markup or instructions is rejected outright.
+const CUSTOM_INTEREST_PATTERN = /^[\p{L}\p{N} .,'&-]+$/u;
+
+// Body: { interests: ['Broadway', ...], custom: ['bird watching', ...] }
+function validateInterests(body) {
+  const { interests = [], custom = [] } = body;
+  if (!Array.isArray(interests) || !Array.isArray(custom)) {
+    return { errors: ['Interests must be lists.'] };
+  }
+
+  const errors = [];
+  const chosen = new Map();
+
+  for (const name of interests) {
+    if (!INTEREST_OPTIONS.includes(name)) {
+      errors.push(`"${String(name).slice(0, 40)}" is not one of the interest options.`);
+    } else {
+      chosen.set(name.toLowerCase(), { name, isCustom: false });
+    }
+  }
+
+  if (custom.length > MAX_CUSTOM_INTERESTS) {
+    errors.push(`Please add at most ${MAX_CUSTOM_INTERESTS} interests of your own.`);
+  }
+  for (const raw of custom.slice(0, MAX_CUSTOM_INTERESTS)) {
+    const name = typeof raw === 'string' ? raw.trim().replace(/\s+/g, ' ') : '';
+    if (!name || name.length > CUSTOM_INTEREST_MAX_LENGTH || !CUSTOM_INTEREST_PATTERN.test(name)) {
+      errors.push(`Interests you add must be 1 to ${CUSTOM_INTEREST_MAX_LENGTH} letters, numbers or spaces.`);
+      break;
+    }
+    if (!chosen.has(name.toLowerCase())) chosen.set(name.toLowerCase(), { name, isCustom: true });
+  }
+
+  if (errors.length > 0) return { errors };
+  if (chosen.size === 0) return { errors: ['Please choose at least one interest.'] };
+  return { data: [...chosen.values()] };
+}
+
+// Body: { metroArea?: 'NYC', activityTypes?: ['Solo', 'Social'] }
+function validatePreferences(body) {
+  const { metroArea, activityTypes } = body;
+  const errors = [];
+  const data = {};
+
+  if (metroArea !== undefined) {
+    if (!Object.hasOwn(METRO_AREAS, metroArea)) errors.push('That city is not supported yet.');
+    else data.metroArea = metroArea;
+  }
+
+  if (activityTypes !== undefined) {
+    const valid =
+      Array.isArray(activityTypes) &&
+      activityTypes.length > 0 &&
+      activityTypes.every((t) => ACTIVITY_TYPES.includes(t));
+    if (!valid) errors.push(`Please choose at least one of: ${ACTIVITY_TYPES.join(', ')}.`);
+    else data.activityTypes = [...new Set(activityTypes)];
+  }
+
+  if (errors.length > 0) return { errors };
+  if (Object.keys(data).length === 0) return { errors: ['Nothing to update.'] };
+  return { data };
+}
+
+const EVENTBRITE_ID_PATTERN = /^\d{1,20}$/;
+
+// Body: { name, defaultCategory, venueId? , eventId? } — one of the two IDs is required
+function validateEventSource(body) {
+  const { name, defaultCategory, venueId, eventId } = body;
+  const errors = [];
+
+  if (!isNonEmptyString(name) || name.trim().length > 100) errors.push('Please give the source a name.');
+  if (!ACTIVITY_TYPES.includes(defaultCategory)) {
+    errors.push(`Category must be one of: ${ACTIVITY_TYPES.join(', ')}.`);
+  }
+  const venue = venueId === undefined ? undefined : String(venueId);
+  const sampleEventId = eventId === undefined ? undefined : String(eventId);
+  if ((venue === undefined) === (sampleEventId === undefined)) {
+    errors.push('Provide either venueId or eventId.');
+  } else if (!EVENTBRITE_ID_PATTERN.test(venue ?? sampleEventId)) {
+    errors.push('Eventbrite IDs are numbers only.');
+  }
+
+  if (errors.length > 0) return { errors };
+  return { data: { name: name.trim(), defaultCategory, venueId: venue, eventId: sampleEventId } };
+}
+
+module.exports = {
+  validateRegistration,
+  validateInterests,
+  validatePreferences,
+  validateEventSource,
+  normalizeEmail,
+};

@@ -32,6 +32,12 @@ jobs:
       - name: Audit dependencies
         run: npm audit --omit=dev --audit-level=high
 
+      # Catches schema mistakes before they reach a deploy (no database needed)
+      - name: Validate Prisma schema
+        run: npx prisma validate
+        env:
+          DATABASE_URL: mysql://ci:ci@localhost:3306/ci
+
       - name: Run tests
         run: npm test
 

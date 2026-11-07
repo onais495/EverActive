@@ -10,6 +10,7 @@ const stores = {
   loginByIp: new MemoryStore(),
   loginByEmail: new MemoryStore(),
   registerByIp: new MemoryStore(),
+  planByUser: new MemoryStore(),
 };
 
 function limiter({ store, windowMs, limit, message, ...options }) {
@@ -53,8 +54,17 @@ const registerByIp = limiter({
   message: 'Too many sign-up attempts. Please try again later.',
 });
 
+// Each generation is a Gemini call, and the free tier has a daily quota. Use after requireAuth.
+const planByUser = limiter({
+  store: stores.planByUser,
+  windowMs: ONE_HOUR,
+  limit: 10,
+  keyGenerator: (req) => `user:${req.user.id}`,
+  message: "You've rebuilt your plan several times this hour. Please try again later.",
+});
+
 function resetRateLimits() {
   Object.values(stores).forEach((store) => store.resetAll());
 }
 
-module.exports = { loginByIp, loginByEmail, registerByIp, resetRateLimits };
+module.exports = { loginByIp, loginByEmail, registerByIp, planByUser, resetRateLimits };
