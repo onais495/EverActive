@@ -30,7 +30,7 @@ async function getEvent(eventId) {
   return request(`/events/${encodeURIComponent(eventId)}/`);
 }
 
-// All live, public events at a venue, with venue details included
+// All live, public events at a venue, with venue and category details included
 async function listVenueEvents(venueId) {
   const events = [];
   let continuation;
@@ -40,7 +40,8 @@ async function listVenueEvents(venueId) {
       status: 'live',
       only_public: 'true',
       order_by: 'start_asc',
-      expand: 'venue',
+      // category gives the name ("Music", "Hobbies & Special Interest") the app filters on
+      expand: 'venue,category',
     };
     if (continuation) params.continuation = continuation;
 

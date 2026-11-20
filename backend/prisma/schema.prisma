@@ -23,25 +23,38 @@ enum ActivityType {
 
 enum PlanItemStatus {
   SUGGESTED
-  REMOVED
+  NOT_INTERESTED
   ATTENDED
 }
 
+// Where a source's events come from
+enum EventProvider {
+  EVENTBRITE
+  LUMA
+}
+
+enum EmailCodePurpose {
+  VERIFY_EMAIL
+  RESET_PASSWORD
+}
+
 model User {
-  id            Int        @id @default(autoincrement())
-  nameFirst     String     @db.VarChar(50)
-  nameLast      String     @db.VarChar(50)
-  dateBirth     DateTime   @db.Date
-  email         String     @unique @db.VarChar(255)
-  password      String     @db.VarChar(255) // bcrypt hash
-  role          Role       @default(USER)
-  isActive      Boolean    @default(true)
-  metroArea     String     @default("NYC") @db.VarChar(20)
-  activityTypes Json? // e.g. ["Social","Intellectual"]; null = all three
-  createdAt     DateTime   @default(now())
-  sessions      Session[]
-  interests     Interest[]
-  planItems     PlanItem[]
+  id              Int         @id @default(autoincrement())
+  nameFirst       String      @db.VarChar(50)
+  nameLast        String      @db.VarChar(50)
+  dateBirth       DateTime    @db.Date
+  email           String      @unique @db.VarChar(255)
+  password        String      @db.VarChar(255) // bcrypt hash
+  role            Role        @default(USER)
+  isActive        Boolean     @default(true)
+  metroArea       String      @default("NYC") @db.VarChar(20)
+  activityTypes   Json? // e.g. ["Social","Intellectual"]; null = all three
+  emailVerifiedAt DateTime? // null until the user enters the code from the confirmation email
+  createdAt       DateTime    @default(now())
+  sessions        Session[]
+  interests       Interest[]
+  planItems       PlanItem[]
+  emailCodes      EmailCode[]
 }
 
 model Session {
@@ -61,7 +74,7 @@ model Interest {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   name      String   @db.VarChar(40)
   isCustom  Boolean  @default(false) // true = typed by the user
-  weight    Int      @default(1) // for the Identity Engine later
+  weight    Int      @default(1) // goes up when the user attends an event that matched this interest
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -69,56 +82,79 @@ model Interest {
 }
 
 model EventSource {
-  id                    Int          @id @default(autoincrement())
-  name                  String       @db.VarChar(100)
-  eventbriteVenueId     String       @db.VarChar(20)
-  eventbriteOrganizerId String?      @db.VarChar(20) // null = every public event at the venue
-  defaultCategory       ActivityType
-  metroArea             String       @default("NYC") @db.VarChar(20)
-  isActive              Boolean      @default(true)
-  lastSyncedAt          DateTime?
-  createdAt             DateTime     @default(now())
-  events                Event[]
+  id                   Int           @id @default(autoincrement())
+  name                 String        @db.VarChar(100)
+  provider             EventProvider @default(EVENTBRITE)
+  externalId           String        @db.VarChar(50) // Eventbrite venue ID, or Luma calendar (cal-...) or city feed (discplace-...)
+  organizerId          String?       @db.VarChar(20) // Eventbrite only; null = every public event at the venue
+  defaultCategory      ActivityType
+  defaultEventCategory String?       @db.VarChar(100) // used when the provider gives no category (Luma always)
+  metroArea            String        @default("NYC") @db.VarChar(20)
+  isActive             Boolean       @default(true)
+  aiScreened           Boolean       @default(false) // true = AI decides which events suit our users, and categorizes them
+  lastSyncedAt         DateTime?
+  createdAt            DateTime      @default(now())
+  events               Event[]
 
-  @@unique([eventbriteVenueId, eventbriteOrganizerId])
+  @@unique([provider, externalId, organizerId])
 }
 
 model Event {
-  id           Int          @id @default(autoincrement())
-  eventbriteId String       @unique @db.VarChar(20)
-  sourceId     Int
-  source       EventSource  @relation(fields: [sourceId], references: [id])
-  title        String       @db.VarChar(200)
-  description  String       @db.Text
-  url          String?      @db.VarChar(500)
-  startsAt     DateTime
-  endsAt       DateTime?
-  venueName    String?      @db.VarChar(200)
-  address      String?      @db.VarChar(300)
-  latitude     Float
-  longitude    Float
-  isFree       Boolean      @default(false)
-  category     ActivityType
-  metroArea    String       @db.VarChar(20)
-  createdAt    DateTime     @default(now())
-  planItems    PlanItem[]
+  id            Int           @id @default(autoincrement())
+  provider      EventProvider @default(EVENTBRITE)
+  externalId    String        @db.VarChar(50) // the provider's event ID
+  sourceId      Int
+  source        EventSource   @relation(fields: [sourceId], references: [id])
+  title         String        @db.VarChar(200)
+  description   String        @db.Text
+  url           String?       @db.VarChar(500)
+  startsAt      DateTime
+  endsAt        DateTime?
+  venueName     String?       @db.VarChar(200)
+  address       String?       @db.VarChar(300)
+  latitude      Float
+  longitude     Float
+  isFree        Boolean? // null = unknown (Luma feeds don't say)
+  category      ActivityType // Solo / Social / Intellectual, from the source
+  eventCategory String?       @db.VarChar(100) // the provider's own category, e.g. "Music"
+  isSuitable    Boolean?      @default(true) // AI-screened sources: null = not screened yet, false = never offered in plans
+  screenedAt    DateTime?
+  metroArea     String        @db.VarChar(20)
+  createdAt     DateTime      @default(now())
+  planItems     PlanItem[]
 
+  @@unique([provider, externalId])
   @@index([metroArea, startsAt])
 }
 
 model PlanItem {
-  id        Int            @id @default(autoincrement())
-  userId    Int
-  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  eventId   Int
-  event     Event          @relation(fields: [eventId], references: [id])
-  weekStart DateTime       @db.Date // Monday of the plan's week (New York time)
-  category  ActivityType
-  reason    String         @db.VarChar(255)
-  status    PlanItemStatus @default(SUGGESTED)
-  removedAt DateTime?
-  createdAt DateTime       @default(now())
+  id               Int            @id @default(autoincrement())
+  userId           Int
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  eventId          Int
+  event            Event          @relation(fields: [eventId], references: [id])
+  weekStart        DateTime       @db.Date // Monday of the plan's week (New York time)
+  category         ActivityType
+  reason           String         @db.VarChar(255)
+  matchedInterests Json? // the user's interests this event was picked for, e.g. ["Gardens"]
+  status           PlanItemStatus @default(SUGGESTED)
+  respondedAt      DateTime? // when the user marked it not interested or attended
+  createdAt        DateTime       @default(now())
 
   @@unique([userId, eventId, weekStart])
   @@index([userId, weekStart])
+}
+
+// One-time 6-digit codes for email confirmation and password reset. Only a hash is stored.
+model EmailCode {
+  id        Int              @id @default(autoincrement())
+  userId    Int
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose   EmailCodePurpose
+  codeHash  String           @db.Char(64) // SHA-256 hex
+  attempts  Int              @default(0)
+  expiresAt DateTime
+  createdAt DateTime         @default(now())
+
+  @@index([userId, purpose])
 }

@@ -1,10 +1,20 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const prisma = require('../db');
-const { createSession, destroySession } = require('../services/sessions');
+const { createSession, destroySession, destroyUserSessions } = require('../services/sessions');
+const { sendCode, checkCode } = require('../services/emailCodes');
 const { requireAuth } = require('../middleware/auth');
-const { validateRegistration, normalizeEmail } = require('../validation');
-const { loginByIp, loginByEmail, registerByIp } = require('../middleware/rateLimit');
+const { validateRegistration, normalizeEmail, passwordError } = require('../validation');
+const {
+  loginByIp,
+  loginByEmail,
+  registerByIp,
+  codeEntryByUser,
+  codeSendByUser,
+  forgotByIp,
+  forgotByEmail,
+  resetByEmail,
+} = require('../middleware/rateLimit');
 
 const router = express.Router();
 // Tests lower this through BCRYPT_ROUNDS; 12 is ~250ms per hash on a laptop
@@ -21,8 +31,20 @@ function publicUser(user) {
     email: user.email,
     role: user.role,
     metroArea: user.metroArea,
+    emailVerified: Boolean(user.emailVerifiedAt),
   };
 }
+
+// Email problems (quota, outage) must never block signing up or asking for a reset
+async function trySendCode(user, purpose) {
+  try {
+    await sendCode(user, purpose);
+  } catch (err) {
+    console.error(`Could not send ${purpose} email:`, err.message);
+  }
+}
+
+const BAD_CODE = 'That code is wrong or has expired. Please request a new one.';
 
 // POST /api/auth/register (was /signup)
 router.post('/register', registerByIp, async (req, res) => {
@@ -44,7 +66,8 @@ router.post('/register', registerByIp, async (req, res) => {
     throw err;
   }
 
-  // Log the user straight in after signing up
+  await trySendCode(user, 'VERIFY_EMAIL');
+  // Log the user straight in after signing up; confirming the email can happen later
   const token = await createSession(user.id);
   res.status(201).json({ token, user: publicUser(user) });
 });
@@ -78,6 +101,65 @@ router.post('/logout', requireAuth, async (req, res) => {
 // GET /api/auth/me (was /currentUser). The app calls this on launch to check the stored token.
 router.get('/me', requireAuth, (req, res) => {
   res.json({ user: publicUser(req.user) });
+});
+
+// POST /api/auth/email/verify: { code } from the confirmation email
+router.post('/email/verify', requireAuth, codeEntryByUser, async (req, res) => {
+  if (req.user.emailVerifiedAt) return res.json({ user: publicUser(req.user) });
+  if (!(await checkCode(req.user.id, 'VERIFY_EMAIL', (req.body || {}).code))) {
+    return res.status(400).json({ message: BAD_CODE });
+  }
+  const user = await prisma.user.update({ where: { id: req.user.id }, data: { emailVerifiedAt: new Date() } });
+  res.json({ user: publicUser(user) });
+});
+
+// POST /api/auth/email/resend: a new confirmation code (the old one stops working)
+router.post('/email/resend', requireAuth, codeSendByUser, async (req, res) => {
+  if (req.user.emailVerifiedAt) return res.json({ message: 'Your email is already confirmed.' });
+  await trySendCode(req.user, 'VERIFY_EMAIL');
+  res.json({ message: 'We sent a new code to your email.' });
+});
+
+// POST /api/auth/password/forgot: { email }. The answer is the same whether or not the account
+// exists, and the email is sent after responding, so neither the message nor the timing reveals it.
+router.post('/password/forgot', forgotByIp, forgotByEmail, async (req, res) => {
+  const { email } = req.body || {};
+  if (typeof email !== 'string' || !email.trim()) {
+    return res.status(400).json({ message: 'Please enter your email address.' });
+  }
+  res.json({ message: 'If an account uses that email, we sent it a code. It works for 15 minutes.' });
+
+  // Already responded, so errors are logged here rather than passed to the error handler
+  try {
+    const user = await prisma.user.findUnique({ where: { email: normalizeEmail(email) } });
+    if (user && user.isActive) await trySendCode(user, 'RESET_PASSWORD');
+  } catch (err) {
+    console.error('Password reset request failed:', err.message);
+  }
+});
+
+// POST /api/auth/password/reset: { email, code, password }. Logs out every device, then logs this one in.
+router.post('/password/reset', resetByEmail, async (req, res) => {
+  const { email, code, password } = req.body || {};
+  if (typeof email !== 'string' || !email.trim() || typeof code !== 'string') {
+    return res.status(400).json({ message: 'Please enter your email, the code and a new password.' });
+  }
+  const pwError = passwordError(password);
+  if (pwError) return res.status(400).json({ message: pwError });
+
+  const user = await prisma.user.findUnique({ where: { email: normalizeEmail(email) } });
+  if (!user || !user.isActive || !(await checkCode(user.id, 'RESET_PASSWORD', code))) {
+    return res.status(400).json({ message: BAD_CODE });
+  }
+
+  const updated = await prisma.user.update({
+    where: { id: user.id },
+    // Getting the code proves they own the inbox, so it confirms the email too
+    data: { password: await bcrypt.hash(password, SALT_ROUNDS), emailVerifiedAt: user.emailVerifiedAt || new Date() },
+  });
+  await destroyUserSessions(user.id);
+  const token = await createSession(user.id);
+  res.json({ token, user: publicUser(updated) });
 });
 
 module.exports = router;

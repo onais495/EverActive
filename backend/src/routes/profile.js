@@ -16,13 +16,33 @@ async function interestsResponse(userId) {
   };
 }
 
-function preferencesResponse(user) {
+const CATEGORY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+// The provider categories ("Music", "Community & Culture") that upcoming events in the city actually
+// have, most common first, so the app's category filter never shows an option with nothing behind it
+async function upcomingEventCategories(metroArea) {
+  const now = new Date();
+  const groups = await prisma.event.groupBy({
+    by: ['eventCategory'],
+    where: {
+      metroArea,
+      eventCategory: { not: null },
+      startsAt: { gte: now, lt: new Date(now.getTime() + CATEGORY_WINDOW_MS) },
+    },
+    _count: { _all: true },
+  });
+  return groups.sort((a, b) => b._count._all - a._count._all).map((g) => g.eventCategory);
+}
+
+async function preferencesResponse(user) {
+  const metroArea = user.metroArea || DEFAULT_METRO_AREA;
   return {
-    metroArea: user.metroArea || DEFAULT_METRO_AREA,
+    metroArea,
     activityTypes: Array.isArray(user.activityTypes) && user.activityTypes.length ? user.activityTypes : ACTIVITY_TYPES,
     options: {
       metroAreas: Object.entries(METRO_AREAS).map(([id, m]) => ({ id, label: m.label })),
       activityTypes: ACTIVITY_TYPES,
+      eventCategories: await upcomingEventCategories(metroArea),
     },
   };
 }
@@ -45,8 +65,8 @@ router.put('/interests', requireAuth, async (req, res) => {
 });
 
 // GET /api/preferences (US006): city and which activity types to include in plans
-router.get('/preferences', requireAuth, (req, res) => {
-  res.json(preferencesResponse(req.user));
+router.get('/preferences', requireAuth, async (req, res) => {
+  res.json(await preferencesResponse(req.user));
 });
 
 // PUT /api/preferences: partial update, e.g. { activityTypes: ['Social', 'Intellectual'] }
@@ -59,7 +79,7 @@ router.put('/preferences', requireAuth, async (req, res) => {
     data,
     select: { metroArea: true, activityTypes: true },
   });
-  res.json(preferencesResponse(user));
+  res.json(await preferencesResponse(user));
 });
 
 module.exports = router;

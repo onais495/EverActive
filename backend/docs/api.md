@@ -56,11 +56,11 @@ Rules (the server checks these too, but checking in the form gives faster feedba
 ```json
 {
   "token": "4f9c…",
-  "user": { "id": 1, "nameFirst": "Gertrude", "nameLast": "Chen", "email": "gertrude@example.com", "role": "USER", "metroArea": "NYC" }
+  "user": { "id": 1, "nameFirst": "Gertrude", "nameLast": "Chen", "email": "gertrude@example.com", "role": "USER", "metroArea": "NYC", "emailVerified": false }
 }
 ```
 Errors: 400 (invalid input), 409 (email already registered), 429 (10 sign-ups per hour per network).
-After success, go to **Interest Onboarding** (US001).
+After success, go to **Interest Onboarding** (US001). A 6-digit confirmation code is emailed at the same time; see [Email confirmation](#email-confirmation-us001).
 
 ### `POST /api/auth/login`
 ```json
@@ -76,6 +76,18 @@ Use on app launch: if a token is stored, call this. **200** → go to the plan; 
 
 ### `POST /api/auth/logout` 🔒
 **200** → `{ "message": "Logged out successfully." }`. Delete the stored token either way.
+
+### Email confirmation (US001)
+Sign-up emails a **6-digit code** (valid 24 hours). Confirming is optional: an unconfirmed user can still use the app, so show a gentle banner ("Confirm your email") while `user.emailVerified` is `false`, not a blocking screen.
+
+- `POST /api/auth/email/verify` 🔒 `{ "code": "482913" }` → **200** `{ "user": { ..., "emailVerified": true } }`. **400** if the code is wrong or expired (each code locks after 5 wrong tries).
+- `POST /api/auth/email/resend` 🔒 → **200** `{ "message": "We sent a new code to your email." }`. The old code stops working. **429** after 3 per hour.
+
+### Password reset
+Two screens: "Forgot password" (email) → "Enter code + new password". Codes, not links, because the app has no website to open a link in.
+
+- `POST /api/auth/password/forgot` `{ "email": "..." }` → **200** always, with the same message whether or not the account exists (so nobody can probe for accounts). Go to the code screen. **429** after 3 per hour for one email.
+- `POST /api/auth/password/reset` `{ "email": "...", "code": "482913", "password": "new-password-here" }` → **200** `{ token, user }`, same as login: **store the new token** and go to the plan. Every other device is logged out. **400** for a wrong/expired code or a weak password (show `message`). The code is valid for 15 minutes.
 
 ---
 
@@ -113,10 +125,12 @@ Replaces the whole list. Used by onboarding and by editing later.
   "activityTypes": ["Solo", "Social", "Intellectual"],
   "options": {
     "metroAreas": [{ "id": "NYC", "label": "New York City" }],
-    "activityTypes": ["Solo", "Social", "Intellectual"]
+    "activityTypes": ["Solo", "Social", "Intellectual"],
+    "eventCategories": ["Music", "Community & Culture", "Charity & Causes"]
   }
 }
 ```
+`options.eventCategories`: the provider categories that upcoming events in the city actually have, most common first. **Use these for the category filter chips** on the Plan screen, so no chip ever leads to an empty list. They are Eventbrite's category names; Luma events are given one from the same list, so one chip covers both sources.
 
 ### `PUT /api/preferences` 🔒
 Send only what changed:
@@ -125,11 +139,11 @@ Send only what changed:
 ```
 **200** → same shape as `GET`.
 
-**Note:** this is the *saved* preference that decides which types go into **generated** plans. The All/Solo/Social/Intellectual chips on the Plan screen can stay as a local display filter on the items you already have.
+**Note:** `activityTypes` is the *saved* preference that decides which types go into **generated** plans. The category chips on the Plan screen are a local display filter on the items you already have: filter on each item's `eventCategory`.
 
 ---
 
-## Weekly plan (US004, US005, US008)
+## Weekly plan (US004, US005, US008, US012)
 
 ### `GET /api/plans/current` 🔒
 This week's plan. Fast (database only). Call when the Plan screen opens.
@@ -139,10 +153,10 @@ This week's plan. Fast (database only). Call when the Plan screen opens.
   "items": [ ActivityCard, ... ]
 }
 ```
-`items` is empty until a plan has been generated this week → show a "Build my week" button.
+`items` is empty until a plan has been generated this week → show a "Build my week" button. It holds suggested and attended activities (not the ones marked "Not interested").
 
 ### `POST /api/plans/current/generate` 🔒
-Builds (or rebuilds) this week's plan. **Takes ~2–5 seconds** (AI call), so show a loading screen (`LoadingScreen.tsx`).
+Builds (or rebuilds) this week's plan: **4 to 7 activities** (fewer only if fewer events exist). **Takes ~2–5 seconds** (AI call), so show a loading screen (`LoadingScreen.tsx`).
 ```json
 {
   "weekStart": "2026-11-02",
@@ -151,15 +165,21 @@ Builds (or rebuilds) this week's plan. **Takes ~2–5 seconds** (AI call), so sh
 }
 ```
 - `source`: `"ai"`, `"rules"` (AI was unavailable, a simpler picker chose), or `"none"` (no events match yet; then `items` is empty and `message` explains)
-- Rebuilding replaces the current suggestions; removed items stay removed.
+- Rebuilding replaces the current suggestions; attended items stay, and "Not interested" items never come back.
 - 429 after 10 rebuilds per hour.
 
 ### `GET /api/plans/items/:id` 🔒
 One activity for the **Detail screen**. **200** → `{ "item": ActivityCard }`. 404 if not found.
 
-### `DELETE /api/plans/items/:id` 🔒
-Removes an activity from the plan (one tap, US005). It won't be suggested again.
-**200** → `{ "message": "Removed from your plan." }`. 404 if not found.
+### `POST /api/plans/items/:id/not-interested` 🔒
+**"Not interested"** (replaces "Remove", US005). One tap: the activity leaves the plan, is never suggested again (nor other dates of the same recurring event), and future plans avoid similar events.
+**200** → `{ "message": "Got it. We won’t suggest this again." }`. 404 if not found.
+Label the button **"Not interested"**. The old `DELETE /api/plans/items/:id` still works and does the same thing, so older builds keep working, but switch to this.
+
+### `POST /api/plans/items/:id/attended` 🔒
+**"I went"** (US012). Allowed once the event has started (`canMarkAttended` is `true`). Future plans favor similar events, and the interests it matched count for more.
+**200** → `{ "message": "Thanks! We’ll suggest more like this.", "item": ActivityCard }` (status `ATTENDED`, stays on the plan).
+**400** if it hasn't started yet. 404 if not found.
 
 ### `ActivityCard`
 Matches the existing `Activity` type in `mobile/src/data/activities.ts`, plus a few fields:
@@ -170,7 +190,9 @@ Matches the existing `Activity` type in `mobile/src/data/activities.ts`, plus a 
   "eventId": 340,
   "title": "Lectures on Tap - \"The Evolution of Mexican Food in New York City\"",
   "category": "Intellectual",
-  "interests": ["Markets"],
+  "eventCategory": "Community & Culture",
+  "provider": "Eventbrite",
+  "interests": ["Book clubs"],
   "day": "Tuesday",
   "time": "6:30 PM",
   "startsAt": "2026-11-10T23:30:00.000Z",
@@ -183,8 +205,9 @@ Matches the existing `Activity` type in `mobile/src/data/activities.ts`, plus a 
   "description": "An evening talk on…",
   "url": "https://www.eventbrite.com/e/…",
   "isFree": false,
-  "reason": "This lecture is a fun dive into food history.",
-  "status": "SUGGESTED"
+  "reason": "We picked this for you because you like book clubs, and this talk digs into the stories behind New York's food.",
+  "status": "SUGGESTED",
+  "canMarkAttended": false
 }
 ```
 
@@ -194,7 +217,15 @@ Differences from the current `Activity` type:
 | `id` | **number** (was string). Use it for the item detail and remove calls. |
 | `attendees` | **`null`**: Eventbrite only shares attendee counts with an event's organizer. Hide the count when null. |
 | `day`, `time` | Already formatted in New York time; display as-is |
-| New | `reason` (why it was picked; nice under the title), `url` (Eventbrite page, for an "Open in Eventbrite" button), `latitude`/`longitude` (map on Detail, US008), `startsAt`/`endsAt` (ISO times if you need them), `isFree` |
+| `reason` | **The personal note**: "We picked this for you because you like …". Show it prominently on the card and the Detail screen. |
+| `interests` | The user's interests this event was picked for (e.g. to highlight matching chips). Can be empty for "something different" picks. |
+| `eventCategory` | **New.** The provider's category (`"Music"`, `"Hobbies & Special Interest"`, ...). Filter on this. Can be `null` for an uncategorized event (show it under "All" only). |
+| `category` | Still `Solo` / `Social` / `Intellectual`, used to balance the week. Fine to show as a small tag or ignore. |
+| `provider` | **New.** `"Eventbrite"` or `"Luma"`, for the button label: "Open in {provider}" with `url`. |
+| `status` | `SUGGESTED` or `ATTENDED` |
+| `canMarkAttended` | **New.** `true` once the event has started and it isn't marked yet; show the "I went" button only then. |
+| `isFree` | `true`, `false`, or **`null` = unknown** (Luma doesn't say). Show "Free" only when `true`. |
+| New | `url`, `latitude`/`longitude` (map on Detail, US008), `startsAt`/`endsAt` (ISO times if you need them) |
 
 ---
 
@@ -211,8 +242,62 @@ Launch ─► token stored? ─no─► Login ◄──────────�
      items empty? ──yes──► "Build my week" ─► POST /plans/current/generate (Loading screen)
               │no
               ▼
-        Plan screen ─tap─► Detail (GET /plans/items/:id) ─remove─► DELETE /plans/items/:id
+        Plan screen ─tap─► Detail (GET /plans/items/:id) ─"Not interested"─► POST /plans/items/:id/not-interested
+                                                        ─"I went"─────────► POST /plans/items/:id/attended
 ```
 
-## Admin endpoints (not for the app yet)
-`/api/admin/event-sources` and `/api/admin/event-sync` manage which Eventbrite venues events come from. They need an `ADMIN` account and are used from the terminal for now (Admin Dashboard UI is Phase 3).
+## Admin endpoints 🔒 (ADMIN accounts only)
+
+### `GET /api/admin/stats` — Admin Dashboard
+Grouped counts only, never anything about an individual (no names, emails, IDs, or custom interest text).
+`sourcesWithNoUpcomingEvents` names sources with nothing in the next 30 days (they probably moved or stopped; replace them). `screening` covers the AI screening of broad feeds over the next 30 days. `next7Days` counts only events that can appear in plans.
+```json
+{
+  "generatedAt": "2026-11-20T06:19:02.846Z",
+  "users": { "total": 42, "active": 41, "emailVerified": 30, "joinedLast7Days": 5 },
+  "plans": {
+    "weekStart": "2026-11-16",
+    "usersWithPlanThisWeek": 18,
+    "activitiesThisWeek": { "suggested": 70, "attended": 12, "notInterested": 9 }
+  },
+  "events": {
+    "activeSources": 7,
+    "sourcesWithNoUpcomingEvents": ["Lectures on Tap"],
+    "screening": { "approved": 21, "rejected": 25, "pending": 0 },
+    "next7Days": {
+      "byProvider": { "EVENTBRITE": 20, "LUMA": 14 },
+      "byEventCategory": { "Music": 6, "Community & Culture": 9, "Uncategorized": 1 },
+      "byActivityType": { "Social": 15, "Solo": 8, "Intellectual": 11 }
+    }
+  },
+  "interests": { "byOption": { "Broadway": 7, "Gardens": 12, "...": 0 }, "customTotal": 9 }
+}
+```
+
+### Event sources
+Used from the terminal for now. `GET /api/admin/event-sources` lists them; `POST /api/admin/event-sync` pulls events now (the daily job does it automatically) and returns `{ results, screening }`.
+
+`POST /api/admin/event-sources`, **Eventbrite** venue (any event ID from that venue and organizer):
+```json
+{ "name": "Lectures on Tap", "defaultCategory": "Intellectual", "eventId": "2003187058416" }
+```
+`defaultEventCategory` is optional for Eventbrite (used only if an event has no category).
+
+**Luma** calendar: on the calendar's page, choose Subscribe → "Add iCal Subscription", copy the link, and paste it (or just the `cal-...` ID):
+```json
+{
+  "provider": "LUMA",
+  "name": "Index Greenpoint",
+  "defaultCategory": "Intellectual",
+  "defaultEventCategory": "Community & Culture",
+  "calendar": "https://api.lu.ma/ics/get?entity=calendar&id=cal-qdFtD4iSoH7Xj4m"
+}
+```
+`defaultEventCategory` is **required** for Luma (its feed has no categories) and must be one of Eventbrite's names (see `EVENT_CATEGORIES` in `src/constants.js`).
+
+**Luma city feed** (AI-screened, set up automatically by a migration for NYC). A city feed has hundreds of events a month, mostly not for our users, so every new event is screened once by Gemini after each sync: suitable for our users or not, Solo/Social/Intellectual, and its category. Only approved events reach plans; unscreened ones wait for the next sync. Adding another city feed: `{ "provider": "LUMA", "name": "...", "calendar": "<the city page's iCal subscription link>" }` (no categories needed). Any source can opt in with `"aiScreened": true`.
+
+`GET /api/admin/screened-events?verdict=rejected` (or `approved`, `pending`): the AI's decisions on upcoming events from screened sources, to spot mistakes.
+`PATCH /api/admin/events/:id` `{ "isSuitable": true }` (or `false`): override the AI for one event.
+
+`PATCH /api/admin/event-sources/:id`: any of `{ "isActive": false }`, `{ "defaultCategory": "Social" }`, `{ "defaultEventCategory": "Music" }`.
