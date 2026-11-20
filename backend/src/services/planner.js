@@ -61,7 +61,7 @@ async function loadInputs(user, now) {
     prisma.interest.findMany({ where: { userId: user.id }, orderBy: { weight: 'desc' } }),
     // Everything the user has told us: attended or not interested, newest first
     prisma.planItem.findMany({
-      where: { userId: user.id, status: { in: ['NOT_INTERESTED', 'ATTENDED'] } },
+      where: { userId: user.id, status: { in: ['NOT_INTERESTED', 'ATTENDED', 'SKIPPED'] } },
       orderBy: { respondedAt: 'desc' },
       include: { event: true },
     }),
@@ -104,7 +104,10 @@ function buildPrompt({ interests, history, candidates, timeZone }) {
     history
       .filter((h) => h.status === status)
       .slice(0, HISTORY_IN_PROMPT)
-      .map((h) => `${sanitizeForPrompt(h.event.title, 80)} (${h.event.eventCategory || h.event.category})`)
+      .map((h) => {
+        const rated = h.rating ? `, rated ${h.rating}/5` : '';
+        return `${sanitizeForPrompt(h.event.title, 80)} (${h.event.eventCategory || h.event.category}${rated})`;
+      })
       .join('; ') || 'none';
 
   const eventList = candidates.map((e) => {
@@ -125,7 +128,8 @@ function buildPrompt({ interests, history, candidates, timeZone }) {
     `Choose between ${minItems} and ${maxItems} events from CANDIDATE_EVENTS. Never return fewer than ${minItems}.`,
     'Rules:',
     '- Only use eventId values that appear in CANDIDATE_EVENTS. Never invent events.',
-    '- Favor events that match their INTERESTS (listed strongest first) and events like ones they ATTENDED.',
+    '- Favor events that match their INTERESTS (listed strongest first) and events like ones they ATTENDED,',
+    '  especially ones they rated highly. Avoid events like ones they rated 1 or 2.',
     '- Avoid events similar to ones they marked NOT_INTERESTED.',
     '- Include a mix of the types Solo, Social and Intellectual when the candidates allow it.',
     '- Do not pick two events that start at the same time.',
@@ -194,7 +198,9 @@ function personalReason(event, matchedNames, history) {
     const venue = event.venueName ? ` It's at ${sanitizeForPrompt(event.venueName, 80)}.` : '';
     return `${because}${venue}`.slice(0, REASON_MAX_LENGTH);
   }
-  const similar = event.eventCategory && history.find((h) => h.status === 'ATTENDED' && h.event.eventCategory === event.eventCategory);
+  const similar =
+    event.eventCategory &&
+    history.find((h) => h.status === 'ATTENDED' && h.event.eventCategory === event.eventCategory && !(h.rating <= 2));
   if (similar) {
     return `You went to "${sanitizeForPrompt(similar.event.title, 60)}", so we think you'll enjoy this ${event.eventCategory.toLowerCase()} event too.`.slice(
       0,
@@ -207,7 +213,10 @@ function personalReason(event, matchedNames, history) {
 // SRS Risk 2 contingency: score by interests and past feedback, then pick one type at a time
 // so the week stays mixed
 function pickByRules(candidates, interests, history = []) {
-  const attendedCategories = new Set(history.filter((h) => h.status === 'ATTENDED').map((h) => h.event.eventCategory));
+  // How much each provider category is liked, from what the user attended and how they rated it
+  const categoryLiking = history
+    .filter((h) => h.status === 'ATTENDED' && h.event.eventCategory)
+    .reduce((acc, h) => acc.set(h.event.eventCategory, (acc.get(h.event.eventCategory) || 0) + attendedScore(h.rating)), new Map());
   const skippedCategories = history
     .filter((h) => h.status === 'NOT_INTERESTED')
     .reduce((counts, h) => counts.set(h.event.eventCategory, (counts.get(h.event.eventCategory) || 0) + 1), new Map());
@@ -216,7 +225,7 @@ function pickByRules(candidates, interests, history = []) {
     .map((event) => {
       const matches = matchInterests(event, interests);
       let score = matches.reduce((sum, i) => sum + 2 * (i.weight || 1), 0);
-      if (event.eventCategory && attendedCategories.has(event.eventCategory)) score += 1;
+      if (event.eventCategory) score += categoryLiking.get(event.eventCategory) || 0;
       // Two or more "not interested" in one category is a pattern, not a one-off
       if ((skippedCategories.get(event.eventCategory) || 0) >= 2) score -= 2;
       return { event, matches, score };
@@ -319,7 +328,12 @@ function toActivityCard(item, interests, timeZone, now = new Date()) {
     isFree: event.isFree,
     reason: item.reason,
     status: item.status,
-    canMarkAttended: item.status === 'SUGGESTED' && event.startsAt <= now,
+    hasStarted: event.startsAt <= now,
+    // "I went" / "I didn't go" once the event has started; either can be corrected later
+    canMarkAttended: event.startsAt <= now && ['SUGGESTED', 'SKIPPED'].includes(item.status),
+    canMarkSkipped: event.startsAt <= now && ['SUGGESTED', 'ATTENDED'].includes(item.status),
+    rating: item.rating ?? null,
+    canRate: item.status === 'ATTENDED',
   };
 }
 
@@ -388,6 +402,28 @@ async function markNotInterested(user, itemId) {
   return { ok: true };
 }
 
+// Ratings shift interest weights: 4-5 stars strengthen, 1-2 weaken, 3 is neutral
+function ratingDelta(rating) {
+  if (!rating) return 0;
+  return rating >= 4 ? 1 : rating <= 2 ? -1 : 0;
+}
+
+// How an attended event counts towards liking its category in the rules fallback
+function attendedScore(rating) {
+  return 1 + 2 * ratingDelta(rating);
+}
+
+// Moves the weight of the interests an event matched, kept between 1 and MAX_INTEREST_WEIGHT
+async function adjustInterestWeights(user, item, delta) {
+  if (delta === 0) return;
+  const interests = await prisma.interest.findMany({ where: { userId: user.id } });
+  const matched = Array.isArray(item.matchedInterests) ? item.matchedInterests : matchInterests(item.event, interests).map((i) => i.name);
+  for (const interest of interests.filter((i) => matched.includes(i.name))) {
+    const weight = Math.min(MAX_INTEREST_WEIGHT, Math.max(1, interest.weight + delta));
+    if (weight !== interest.weight) await prisma.interest.update({ where: { id: interest.id }, data: { weight } });
+  }
+}
+
 // US012: the user went. Future plans favor similar events, and the interests it matched get stronger.
 async function markAttended(user, itemId, now = new Date()) {
   const item = await findOwnItem(user, itemId);
@@ -396,12 +432,30 @@ async function markAttended(user, itemId, now = new Date()) {
   if (item.status === 'ATTENDED') return { ok: true };
 
   await prisma.planItem.update({ where: { id: item.id }, data: { status: 'ATTENDED', respondedAt: now } });
+  await adjustInterestWeights(user, item, 1);
+  return { ok: true };
+}
 
-  const interests = await prisma.interest.findMany({ where: { userId: user.id } });
-  const matched = Array.isArray(item.matchedInterests) ? item.matchedInterests : matchInterests(item.event, interests).map((i) => i.name);
-  for (const interest of interests.filter((i) => matched.includes(i.name) && i.weight < MAX_INTEREST_WEIGHT)) {
-    await prisma.interest.update({ where: { id: interest.id }, data: { weight: interest.weight + 1 } });
-  }
+// US012: the event happened and the user didn't go. Undoes an "I went" tapped by mistake.
+async function markSkipped(user, itemId, now = new Date()) {
+  const item = await findOwnItem(user, itemId);
+  if (!item) return { error: 'not_found' };
+  if (item.event.startsAt > now) return { error: 'not_started' };
+  if (item.status === 'SKIPPED') return { ok: true };
+
+  await prisma.planItem.update({ where: { id: item.id }, data: { status: 'SKIPPED', respondedAt: now, rating: null } });
+  if (item.status === 'ATTENDED') await adjustInterestWeights(user, item, -1 - ratingDelta(item.rating));
+  return { ok: true };
+}
+
+// US012: 1-5 stars for an attended activity. Changing a rating replaces its effect, never stacks it.
+async function rateItem(user, itemId, rating) {
+  const item = await findOwnItem(user, itemId);
+  if (!item) return { error: 'not_found' };
+  if (item.status !== 'ATTENDED') return { error: 'not_attended' };
+
+  await prisma.planItem.update({ where: { id: item.id }, data: { rating } });
+  await adjustInterestWeights(user, item, ratingDelta(rating) - ratingDelta(item.rating));
   return { ok: true };
 }
 
@@ -417,6 +471,8 @@ module.exports = {
   generatePlan,
   markNotInterested,
   markAttended,
+  markSkipped,
+  rateItem,
   getPlanItem,
   // Exported for tests
   buildPrompt,

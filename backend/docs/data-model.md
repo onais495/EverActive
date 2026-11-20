@@ -37,6 +37,13 @@ Every event has both:
 
 Luma sources are assigned a category from Eventbrite's list, so a filter like "Music" covers events from both providers.
 
+## Reminders (US009)
+
+`Nudge` rows are reminders: the daily job (`src/jobs/nudgeJob.js`, on when `NUDGES_ENABLED=true`) creates one for each active
+user with no attended Social event in 7 days (at most one per 3 days), with `eventIds` of the suggested events.
+`emailedAt` / `pushedAt` record delivery, `seenAt` / `dismissedAt` what the user did. `Device` holds Expo push tokens.
+`User.nudgeEmails` is the email opt-out; `User.unsubscribeToken` backs the one-tap link in emails.
+
 ## AI screening
 
 Sources with `aiScreened = true` (Luma's whole-city feed) bring in many unsuitable events, so their new events
@@ -50,6 +57,8 @@ a city feed and a hand-picked calendar, the calendar owns it.
 
 `SUGGESTED` → `NOT_INTERESTED` (user tapped "Not interested"; hidden, never suggested again, avoided in future prompts)
 or → `ATTENDED` (user went; stays on the plan, future plans favor similar events, and matched interests' `weight` goes up by 1, max 5).
+Also → `SKIPPED` (the event happened and the user didn't go; undoes an earlier ATTENDED). Attended items can get a 1–5 `rating`:
+4–5 stars add 1 to the matched interests' weight, 1–2 subtract 1 (kept between 1 and 5); changing a rating replaces its effect.
 `respondedAt` records when. `matchedInterests` stores which of the user's interests the event was picked for.
 The Sprint 3 migration renamed `REMOVED` to `NOT_INTERESTED` and `removedAt` to `respondedAt`, keeping existing rows.
 

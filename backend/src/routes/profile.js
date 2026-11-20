@@ -39,6 +39,8 @@ async function preferencesResponse(user) {
   return {
     metroArea,
     activityTypes: Array.isArray(user.activityTypes) && user.activityTypes.length ? user.activityTypes : ACTIVITY_TYPES,
+    // Reminder emails (US009); in-app reminders always show
+    nudgeEmails: user.nudgeEmails !== false,
     options: {
       metroAreas: Object.entries(METRO_AREAS).map(([id, m]) => ({ id, label: m.label })),
       activityTypes: ACTIVITY_TYPES,
@@ -77,7 +79,7 @@ router.put('/preferences', requireAuth, async (req, res) => {
   const user = await prisma.user.update({
     where: { id: req.user.id },
     data,
-    select: { metroArea: true, activityTypes: true },
+    select: { metroArea: true, activityTypes: true, nudgeEmails: true },
   });
   res.json(await preferencesResponse(user));
 });

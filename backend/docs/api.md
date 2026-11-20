@@ -139,6 +139,8 @@ Send only what changed:
 ```
 **200** → same shape as `GET`.
 
+`nudgeEmails` (`true` by default): whether reminder emails are sent. Show it as a switch in Settings ("Email me reminders"); change it with `PUT /api/preferences` `{ "nudgeEmails": false }`. In-app reminders always show.
+
 **Note:** `activityTypes` is the *saved* preference that decides which types go into **generated** plans. The category chips on the Plan screen are a local display filter on the items you already have: filter on each item's `eventCategory`.
 
 ---
@@ -181,6 +183,18 @@ Label the button **"Not interested"**. The old `DELETE /api/plans/items/:id` sti
 **200** → `{ "message": "Thanks! We’ll suggest more like this.", "item": ActivityCard }` (status `ATTENDED`, stays on the plan).
 **400** if it hasn't started yet. 404 if not found.
 
+### `POST /api/plans/items/:id/skipped` 🔒
+**"I didn't go"** (US012). Allowed once the event has started (`canMarkSkipped`). Also undoes an "I went" tapped by mistake (and clears its rating).
+**200** → `{ "message": "Thanks for letting us know.", "item": ActivityCard }`. 400 if it hasn't started, 404 if not found.
+
+### `PUT /api/plans/items/:id/rating` 🔒
+**1–5 stars** for an attended activity (US012), shown after "I went" (`canRate`). Can be changed later; the new rating replaces the old one.
+```json
+{ "rating": 4 }
+```
+**200** → `{ "message": "Thanks for the rating!", "item": ActivityCard }`. 400 for anything but a whole number 1–5, or if not marked attended.
+High ratings make similar activities more likely in future plans; 1–2 stars make them less likely.
+
 ### `ActivityCard`
 Matches the existing `Activity` type in `mobile/src/data/activities.ts`, plus a few fields:
 
@@ -222,12 +236,46 @@ Differences from the current `Activity` type:
 | `eventCategory` | **New.** The provider's category (`"Music"`, `"Hobbies & Special Interest"`, ...). Filter on this. Can be `null` for an uncategorized event (show it under "All" only). |
 | `category` | Still `Solo` / `Social` / `Intellectual`, used to balance the week. Fine to show as a small tag or ignore. |
 | `provider` | **New.** `"Eventbrite"` or `"Luma"`, for the button label: "Open in {provider}" with `url`. |
-| `status` | `SUGGESTED` or `ATTENDED` |
-| `canMarkAttended` | **New.** `true` once the event has started and it isn't marked yet; show the "I went" button only then. |
+| `status` | `SUGGESTED`, `ATTENDED` or `SKIPPED` ("didn't go") |
+| `hasStarted` | **New.** `true` once the event's start time has passed |
+| `canMarkAttended` / `canMarkSkipped` | **New.** Show "I went" / "I didn't go" only when `true` (after the start time) |
+| `rating`, `canRate` | **New.** The user's 1–5 stars (or `null`); show the stars when `canRate` is `true` |
 | `isFree` | `true`, `false`, or **`null` = unknown** (Luma doesn't say). Show "Free" only when `true`. |
 | New | `url`, `latitude`/`longitude` (map on Detail, US008), `startsAt`/`endsAt` (ISO times if you need them) |
 
 ---
+
+## Reminders (US009)
+
+Once a day (mid-morning New York time) the backend checks who hasn't been to a **social** activity in 7 days (new users get a week first) and writes them a personal reminder with one or two real social events coming up, preferring ones already in their plan. At most one every 3 days, and only when there's something to suggest. Each reminder is:
+- **shown in the app** (below),
+- **emailed** if the address is confirmed and `nudgeEmails` is on (every email has a one-tap unsubscribe link),
+- **pushed** to registered phones (see Devices). Push reaches a real iPhone only in a build made with an Apple Developer account; in-app and email don't depend on it.
+
+### `GET /api/nudges/current` 🔒
+Call when the Plan screen opens. Show it as a banner above the plan; `null` means nothing to show.
+```json
+{
+  "nudge": {
+    "id": 2,
+    "kind": "SOCIAL_GAP",
+    "message": "It's been 9 days since your last social outing. Since you like live music, \"THE JAM VOL. XI\" on Friday at 8:00 PM could be a nice way to get out. It's already in your plan for this week.",
+    "createdAt": "2026-11-20T15:00:00.000Z",
+    "events": [
+      { "eventId": 149, "title": "THE JAM VOL. XI", "day": "Friday", "time": "8:00 PM", "startsAt": "…", "location": "26 Bridge", "url": "https://luma.com/…", "planItemId": 23 }
+    ]
+  }
+}
+```
+Tapping an event: if `planItemId` is set, open that item's Detail screen; otherwise open `url`.
+
+### `POST /api/nudges/:id/dismiss` 🔒
+The banner's ✕. **200**; the banner stays hidden.
+
+### Devices (push notifications) 🔒
+- `POST /api/devices` `{ "pushToken": "ExponentPushToken[…]", "platform": "ios" }` after the user allows notifications (from `expo-notifications`' `getExpoPushTokenAsync`). Safe to call on every launch.
+- `DELETE /api/devices` `{ "pushToken": "…" }` on logout.
+A push carries `data: { screen: "plan", nudgeId }`: open the Plan screen when it's tapped.
 
 ## Suggested app flow
 
@@ -250,6 +298,7 @@ Launch ─► token stored? ─no─► Login ◄──────────�
 
 ### `GET /api/admin/stats` — Admin Dashboard
 Grouped counts only, never anything about an individual (no names, emails, IDs, or custom interest text).
+`engagement` (last 4 weeks, US010): `attendanceRate` = attended ÷ (attended + didn't go) among activities users responded to; `mostAttendedActivityTypes`; `averageRatingByActivityType`; `nudgesLast7Days`.
 `sourcesWithNoUpcomingEvents` names sources with nothing in the next 30 days (they probably moved or stopped; replace them). `screening` covers the AI screening of broad feeds over the next 30 days. `next7Days` counts only events that can appear in plans.
 ```json
 {
@@ -273,6 +322,13 @@ Grouped counts only, never anything about an individual (no names, emails, IDs, 
   "interests": { "byOption": { "Broadway": 7, "Gardens": 12, "...": 0 }, "customTotal": 9 }
 }
 ```
+
+### Accounts (US011)
+- `GET /api/admin/users?page=1` → `{ users: [{ id, nameFirst, nameLast, email, role, isActive, createdAt }], page, pageSize: 50, total }`. Names and emails only; never interests or activity.
+- `PATCH /api/admin/users/:id` `{ "isActive": false }` deactivates (logs them out everywhere; nothing is deleted); `true` reactivates. Admins can't deactivate themselves.
+
+### Reminders
+`POST /api/admin/nudges/run` sends today's reminders now (for demos) → `{ summary: { checked, nudged, emailed, pushed, failed } }`.
 
 ### Event sources
 Used from the terminal for now. `GET /api/admin/event-sources` lists them; `POST /api/admin/event-sync` pulls events now (the daily job does it automatically) and returns `{ results, screening }`.

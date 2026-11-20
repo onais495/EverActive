@@ -445,3 +445,79 @@ describe('when the AI picks too few', () => {
     expect(res.body.source).toBe('rules');
   });
 });
+
+describe('feedback on past activities (US012)', () => {
+  async function pastItem(interests = ['Gardens']) {
+    const owner = await signUp();
+    await request(app).put('/api/interests').set(owner.auth).send({ interests });
+    const events = await seedMixedWeek();
+    gemini.generateJson.mockResolvedValue(geminiPicks(events.slice(0, 4), ['Gardens']));
+    const plan = await request(app).post('/api/plans/current/generate').set(owner.auth);
+    const item = plan.body.items[0];
+    fakeDb.events.find((e) => e.id === item.eventId).startsAt = new Date(Date.now() - HOUR);
+    return { owner, item };
+  }
+  const weight = (name) => fakeDb.interests.find((i) => i.name === name).weight;
+
+  test("\"I didn't go\" is recorded once the event has started", async () => {
+    const { owner, item } = await pastItem();
+    const res = await request(app).post(`/api/plans/items/${item.id}/skipped`).set(owner.auth);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.item).toMatchObject({ status: 'SKIPPED', canMarkAttended: true, canMarkSkipped: false, canRate: false });
+  });
+
+  test('ratings: only after attending, 1 to 5, and they move interest weights without stacking', async () => {
+    const { owner, item } = await pastItem();
+    const rate = (rating) => request(app).put(`/api/plans/items/${item.id}/rating`).set(owner.auth).send({ rating });
+
+    expect((await rate(5)).statusCode).toBe(400); // not attended yet
+    await request(app).post(`/api/plans/items/${item.id}/attended`).set(owner.auth);
+    expect(weight('Gardens')).toBe(2);
+
+    for (const bad of [0, 6, 3.5, '5']) expect((await rate(bad)).statusCode).toBe(400);
+
+    const five = await rate(5);
+    expect(five.body.item).toMatchObject({ rating: 5, canRate: true });
+    expect(weight('Gardens')).toBe(3);
+    await rate(5);
+    expect(weight('Gardens')).toBe(3); // re-rating the same doesn't stack
+    await rate(1);
+    expect(weight('Gardens')).toBe(1); // 2 (attended) - 1 (low rating), never below 1
+  });
+
+  test('"I didn\'t go" after "I went" undoes the attended effect and clears the rating', async () => {
+    const { owner, item } = await pastItem();
+    await request(app).post(`/api/plans/items/${item.id}/attended`).set(owner.auth);
+    await request(app).put(`/api/plans/items/${item.id}/rating`).set(owner.auth).send({ rating: 5 });
+    expect(weight('Gardens')).toBe(3);
+
+    const res = await request(app).post(`/api/plans/items/${item.id}/skipped`).set(owner.auth);
+    expect(res.body.item).toMatchObject({ status: 'SKIPPED', rating: null });
+    expect(weight('Gardens')).toBe(1);
+  });
+
+  test('ratings go into the next prompt', async () => {
+    const { owner, item } = await pastItem();
+    await request(app).post(`/api/plans/items/${item.id}/attended`).set(owner.auth);
+    await request(app).put(`/api/plans/items/${item.id}/rating`).set(owner.auth).send({ rating: 4 });
+    gemini.generateJson.mockRejectedValue(new Error('down'));
+    await request(app).post('/api/plans/current/generate').set(owner.auth);
+    const { input } = gemini.generateJson.mock.calls.at(-1)[0];
+    expect(input).toContain(`ATTENDED: ${item.title} (${item.eventCategory}, rated 4/5)`);
+  });
+
+  test('the rules fallback favors categories the user rated highly', () => {
+    const music = { id: 1, title: 'Concert', description: '', category: 'Social', eventCategory: 'Music', startsAt: new Date(Date.now() + 2 * HOUR) };
+    const talk = { id: 2, title: 'Talk', description: '', category: 'Social', eventCategory: 'Science & Technology', startsAt: new Date(Date.now() + HOUR) };
+    const history = (rating) => [{ status: 'ATTENDED', rating, event: { title: 'Earlier gig', eventCategory: 'Music' } }];
+    expect(planner.pickByRules([talk, music], [], history(5))[0].event.title).toBe('Concert');
+    expect(planner.pickByRules([talk, music], [], history(1))[0].event.title).toBe('Talk');
+  });
+
+  test("users can't rate or mark each other's activities", async () => {
+    const { item } = await pastItem();
+    const stranger = await signUp();
+    expect((await request(app).post(`/api/plans/items/${item.id}/skipped`).set(stranger.auth)).statusCode).toBe(404);
+    expect((await request(app).put(`/api/plans/items/${item.id}/rating`).set(stranger.auth).send({ rating: 5 })).statusCode).toBe(404);
+  });
+});

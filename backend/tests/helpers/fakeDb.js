@@ -12,9 +12,11 @@ const MODELS = {
       metroArea: 'NYC',
       activityTypes: null,
       emailVerifiedAt: null,
+      nudgeEmails: true,
+      unsubscribeToken: null,
       createdAt: new Date(),
     }),
-    unique: [['email']],
+    unique: [['email'], ['unsubscribeToken']],
   },
   session: {
     defaults: () => ({ createdAt: new Date() }),
@@ -56,6 +58,7 @@ const MODELS = {
       status: 'SUGGESTED',
       reason: '',
       matchedInterests: null,
+      rating: null,
       respondedAt: null,
       createdAt: new Date(),
     }),
@@ -64,6 +67,13 @@ const MODELS = {
   },
   emailCode: {
     defaults: () => ({ attempts: 0, createdAt: new Date() }),
+  },
+  nudge: {
+    defaults: () => ({ emailedAt: null, pushedAt: null, seenAt: null, dismissedAt: null, createdAt: new Date() }),
+  },
+  device: {
+    defaults: () => ({ createdAt: new Date(), updatedAt: new Date() }),
+    unique: [['pushToken']],
   },
 };
 
@@ -142,6 +152,8 @@ function shape(modelName, row, { select, include } = {}) {
 
 function checkUnique(modelName, candidate, ignoreId) {
   for (const columns of MODELS[modelName].unique || []) {
+    // Like MySQL, a NULL never clashes with another NULL in a single-column unique index
+    if (columns.length === 1 && (candidate[columns[0]] === null || candidate[columns[0]] === undefined)) continue;
     const clash = tables[modelName].some(
       (row) => row.id !== ignoreId && columns.every((c) => same(row[c], candidate[c]))
     );
@@ -180,9 +192,9 @@ function model(name) {
       const [row] = await this.findMany({ ...args, take: 1 });
       return row || null;
     },
-    async findMany({ where, orderBy, take, select, include } = {}) {
+    async findMany({ where, orderBy, skip = 0, take, select, include } = {}) {
       const rows = sortRows(tables[name].filter((r) => matches(r, where)), orderBy);
-      return rows.slice(0, take ?? rows.length).map((r) => shape(name, r, { select, include }));
+      return rows.slice(skip, take === undefined ? undefined : skip + take).map((r) => shape(name, r, { select, include }));
     },
     async count({ where } = {}) {
       return tables[name].filter((r) => matches(r, where)).length;
@@ -232,6 +244,8 @@ const fakeDb = {
   get events() { return tables.event; },
   get planItems() { return tables.planItem; },
   get emailCodes() { return tables.emailCode; },
+  get nudges() { return tables.nudge; },
+  get devices() { return tables.device; },
 
   // Array form: the operations have already run by the time they're awaited here
   async $transaction(operations) {

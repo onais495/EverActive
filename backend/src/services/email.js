@@ -16,7 +16,7 @@ function escapeHtml(text) {
 }
 
 // Returns true if sent, false if email isn't configured. Throws EmailError if Brevo rejects it.
-async function sendEmail({ to, subject, text }) {
+async function sendEmail({ to, subject, text, headers }) {
   if (!isConfigured()) {
     // Never log the recipient or body: they contain an email address and a one-time code
     console.warn(`Email not sent ("${subject}"): BREVO_API_KEY or EMAIL_FROM is not set.`);
@@ -34,6 +34,7 @@ async function sendEmail({ to, subject, text }) {
       sender: { name: 'EverActive', email: process.env.EMAIL_FROM },
       to: [{ email: to }],
       subject,
+      ...(headers ? { headers } : {}),
       textContent: text,
       // Large, plain text for older readers; no images or tracking
       htmlContent: `<div style="font-family:Arial,sans-serif;font-size:18px;line-height:1.5">${escapeHtml(text)

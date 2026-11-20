@@ -20,6 +20,7 @@ const SESSION_USER_FIELDS = {
   metroArea: true,
   activityTypes: true,
   emailVerifiedAt: true,
+  nudgeEmails: true,
 };
 
 // Only the hash is stored, so a leaked database can't be used to log in as anyone

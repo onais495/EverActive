@@ -15,6 +15,7 @@ async function getAdminStats(now = new Date()) {
   // Only events that can actually appear in plans
   const upcoming = { startsAt: { gte: now, lt: nextWeek }, isSuitable: true };
   const nextMonth = { startsAt: { gte: now, lt: new Date(now.getTime() + 30 * DAY_MS) } };
+  const lastFourWeeks = { respondedAt: { gte: new Date(now.getTime() - 28 * DAY_MS) } };
 
   const [
     totalUsers,
@@ -53,6 +54,25 @@ async function getAdminStats(now = new Date()) {
   const pendingScreening = await prisma.event.count({ where: { ...nextMonth, isSuitable: null } });
 
   const statuses = countsBy(itemsByStatus, 'status');
+
+  // US010: attendance and what people actually go to, over the last 4 weeks. "Attendance rate" is
+  // attended / (attended + didn't go) among activities users told us about.
+  const [outcomes, attendedByType, rated, nudgesSent, nudgesEmailed] = await Promise.all([
+    prisma.planItem.groupBy({ by: ['status'], where: { ...lastFourWeeks, status: { in: ['ATTENDED', 'SKIPPED'] } }, _count: { _all: true } }),
+    prisma.planItem.groupBy({ by: ['category'], where: { ...lastFourWeeks, status: 'ATTENDED' }, _count: { _all: true } }),
+    prisma.planItem.findMany({ where: { ...lastFourWeeks, status: 'ATTENDED', rating: { not: null } }, select: { category: true, rating: true } }),
+    prisma.nudge.count({ where: { createdAt: { gte: weekAgo } } }),
+    prisma.nudge.count({ where: { createdAt: { gte: weekAgo }, emailedAt: { not: null } } }),
+  ]);
+  const outcome = countsBy(outcomes, 'status');
+  const attended = outcome.ATTENDED || 0;
+  const skipped = outcome.SKIPPED || 0;
+  const ratingsByType = rated.reduce((acc, r) => {
+    acc[r.category] = acc[r.category] || { total: 0, count: 0 };
+    acc[r.category].total += r.rating;
+    acc[r.category].count++;
+    return acc;
+  }, {});
   const interests = countsBy(interestCounts, 'name');
 
   return {
@@ -78,6 +98,19 @@ async function getAdminStats(now = new Date()) {
         byEventCategory: countsBy(upcomingByCategory, 'eventCategory'),
         byActivityType: countsBy(upcomingByType, 'category'),
       },
+    },
+    engagement: {
+      period: 'last 4 weeks',
+      attended,
+      didntGo: skipped,
+      attendanceRate: attended + skipped > 0 ? Math.round((attended / (attended + skipped)) * 100) / 100 : null,
+      mostAttendedActivityTypes: attendedByType
+        .map((g) => ({ activityType: g.category, attended: g._count._all }))
+        .sort((a, b) => b.attended - a.attended),
+      averageRatingByActivityType: Object.fromEntries(
+        Object.entries(ratingsByType).map(([type, r]) => [type, { average: Math.round((r.total / r.count) * 10) / 10, ratings: r.count }])
+      ),
+      nudgesLast7Days: { sent: nudgesSent, emailed: nudgesEmailed },
     },
     interests: {
       byOption: Object.fromEntries(INTEREST_OPTIONS.map((name) => [name, interests[name] || 0])),
