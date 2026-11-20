@@ -1,7 +1,7 @@
 const request = require('supertest');
 const app = require('../src/app');
 const fakeDb = require('./helpers/fakeDb');
-const { signUp } = require('./helpers/factories');
+const { signUp, seedEvent, HOUR } = require('./helpers/factories');
 
 describe('interests (US003)', () => {
   test('requires login', async () => {
@@ -68,6 +68,17 @@ describe('preferences (US006)', () => {
     const res = await request(app).get('/api/preferences').set(auth);
     expect(res.body.metroArea).toBe('NYC');
     expect(res.body.activityTypes).toEqual(['Solo', 'Social', 'Intellectual']);
+  });
+
+  test('lists the event categories upcoming events actually have, most common first', async () => {
+    const { auth } = await signUp();
+    await seedEvent({ eventCategory: 'Music' });
+    await seedEvent({ eventCategory: 'Music' });
+    await seedEvent({ eventCategory: 'Hobbies & Special Interest' });
+    await seedEvent({ eventCategory: null });
+    await seedEvent({ eventCategory: 'Food & Drink', startsAt: new Date(Date.now() - HOUR) });
+    const res = await request(app).get('/api/preferences').set(auth);
+    expect(res.body.options.eventCategories).toEqual(['Music', 'Hobbies & Special Interest']);
   });
 
   test('saves activity type filters to the profile', async () => {

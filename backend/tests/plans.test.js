@@ -16,35 +16,46 @@ beforeEach(() => {
 afterEach(() => warn.mockRestore());
 
 async function seedMixedWeek() {
-  return Promise.all([
-    seedEvent({ title: 'Broadway backstage tour', category: 'Social' }),
-    seedEvent({ title: 'Garden sketching walk', category: 'Solo' }),
-    seedEvent({ title: 'Markets and investing talk', category: 'Intellectual' }),
-    seedEvent({ title: 'Jazz night', category: 'Social' }),
-    seedEvent({ title: 'Poetry lecture', category: 'Intellectual' }),
-  ]);
+  const events = [];
+  // Sequential, so each event gets a distinct start time
+  for (const [title, category, eventCategory] of [
+    ['Broadway backstage tour', 'Social', 'Performing & Visual Arts'],
+    ['Garden sketching walk', 'Solo', 'Hobbies & Special Interest'],
+    ['Markets and investing talk', 'Intellectual', 'Business & Professional'],
+    ['Jazz night', 'Social', 'Music'],
+    ['Poetry lecture', 'Intellectual', 'Community & Culture'],
+    ['Quiet museum morning', 'Solo', 'Performing & Visual Arts'],
+    ['Chess in the park', 'Social', 'Hobbies & Special Interest'],
+    ['Astronomy talk', 'Intellectual', 'Science & Technology'],
+  ]) {
+    events.push(await seedEvent({ title, category, eventCategory }));
+  }
+  return events;
 }
 
-function geminiPicks(events) {
-  return { picks: events.map((e) => ({ eventId: String(e.id), reason: `Because ${e.title}` })) };
+function geminiPicks(events, matchedInterests = []) {
+  return { picks: events.map((e) => ({ eventId: String(e.id), matchedInterests, reason: `Because ${e.title}` })) };
 }
 
 describe('POST /api/plans/current/generate (US004)', () => {
   test('saves the AI picks and returns them as activity cards', async () => {
     const { auth } = await signUp();
     const events = await seedMixedWeek();
-    gemini.generateJson.mockResolvedValue(geminiPicks(events.slice(0, 3)));
+    gemini.generateJson.mockResolvedValue(geminiPicks(events.slice(0, 4)));
 
     const res = await request(app).post('/api/plans/current/generate').set(auth);
 
     expect(res.statusCode).toBe(200);
     expect(res.body.source).toBe('ai');
-    expect(res.body.items).toHaveLength(3);
+    expect(res.body.items).toHaveLength(4);
     expect(res.body.items[0]).toMatchObject({
       title: 'Broadway backstage tour',
       category: 'Social',
+      eventCategory: 'Performing & Visual Arts',
+      provider: 'Eventbrite',
       reason: 'Because Broadway backstage tour',
       status: 'SUGGESTED',
+      canMarkAttended: false,
     });
     expect(res.body.items[0]).toHaveProperty('day');
     expect(res.body.items[0]).toHaveProperty('time');
@@ -59,7 +70,31 @@ describe('POST /api/plans/current/generate (US004)', () => {
 
     expect(gemini.generateJson).toHaveBeenCalledTimes(2);
     expect(res.body.source).toBe('rules');
-    expect(res.body.items.length).toBeGreaterThanOrEqual(3);
+    expect(res.body.items.length).toBeGreaterThanOrEqual(4);
+  });
+
+  test('plans hold 4 to 7 events: more than 3 when there are enough candidates', async () => {
+    const { auth } = await signUp();
+    const events = await seedMixedWeek();
+    gemini.generateJson.mockResolvedValue(geminiPicks(events.slice(0, 7)));
+    const res = await request(app).post('/api/plans/current/generate').set(auth);
+    expect(res.body.source).toBe('ai');
+    expect(res.body.items).toHaveLength(7);
+
+    // 8 picks is too many; the rules fallback then builds a 5-event week
+    gemini.generateJson.mockResolvedValue(geminiPicks(events));
+    const again = await request(app).post('/api/plans/current/generate').set(auth);
+    expect(again.body.source).toBe('rules');
+    expect(again.body.items).toHaveLength(5);
+  });
+
+  test('with fewer than 4 events available, the plan includes all of them', async () => {
+    const { auth } = await signUp();
+    const events = [await seedEvent({ title: 'A' }), await seedEvent({ title: 'B' })];
+    gemini.generateJson.mockResolvedValue(geminiPicks(events));
+    const res = await request(app).post('/api/plans/current/generate').set(auth);
+    expect(res.body.source).toBe('ai');
+    expect(res.body.items).toHaveLength(2);
   });
 
   test('falls back to rules when Gemini is down', async () => {
@@ -117,7 +152,7 @@ describe('POST /api/plans/current/generate (US004)', () => {
     await request(app).post('/api/plans/current/generate').set(auth);
     await request(app).post('/api/plans/current/generate').set(auth);
     const suggested = fakeDb.planItems.filter((p) => p.userId === user.id && p.status === 'SUGGESTED');
-    expect(suggested.length).toBeLessThanOrEqual(5);
+    expect(suggested.length).toBeLessThanOrEqual(7);
   });
 
   test('is rate limited per user', async () => {
@@ -170,48 +205,73 @@ describe('GET /api/plans/current', () => {
   });
 });
 
-describe('removing an activity (US005)', () => {
-  async function planWithItems() {
-    const owner = await signUp();
-    const events = await seedMixedWeek();
-    gemini.generateJson.mockResolvedValue(geminiPicks(events.slice(0, 3)));
-    const plan = await request(app).post('/api/plans/current/generate').set(owner.auth);
-    return { owner, events, items: plan.body.items };
-  }
+async function planWithItems() {
+  const owner = await signUp();
+  const events = await seedMixedWeek();
+  gemini.generateJson.mockResolvedValue(geminiPicks(events.slice(0, 4)));
+  const plan = await request(app).post('/api/plans/current/generate').set(owner.auth);
+  return { owner, events, items: plan.body.items };
+}
 
-  test('removes it from the plan but keeps it as history', async () => {
+describe('not interested (US005)', () => {
+  test('hides it from the plan but keeps it as history', async () => {
     const { owner, items } = await planWithItems();
-    const res = await request(app).delete(`/api/plans/items/${items[0].id}`).set(owner.auth);
+    const res = await request(app).post(`/api/plans/items/${items[0].id}/not-interested`).set(owner.auth);
     expect(res.statusCode).toBe(200);
+    expect(res.body.message).toMatch(/won’t suggest this again/);
 
     const plan = await request(app).get('/api/plans/current').set(owner.auth);
     expect(plan.body.items.map((i) => i.id)).not.toContain(items[0].id);
-    expect(fakeDb.planItems.find((p) => p.id === items[0].id).status).toBe('REMOVED');
+    const row = fakeDb.planItems.find((p) => p.id === items[0].id);
+    expect(row.status).toBe('NOT_INTERESTED');
+    expect(row.respondedAt).toBeInstanceOf(Date);
   });
 
-  test('a removed event is never suggested again', async () => {
+  test('the old DELETE call still works for older app builds', async () => {
     const { owner, items } = await planWithItems();
-    await request(app).delete(`/api/plans/items/${items[0].id}`).set(owner.auth);
+    expect((await request(app).delete(`/api/plans/items/${items[0].id}`).set(owner.auth)).statusCode).toBe(200);
+    expect(fakeDb.planItems.find((p) => p.id === items[0].id).status).toBe('NOT_INTERESTED');
+  });
+
+  test('is never suggested again, and the AI is told to avoid similar events', async () => {
+    const { owner, items } = await planWithItems();
+    await request(app).post(`/api/plans/items/${items[0].id}/not-interested`).set(owner.auth);
 
     gemini.generateJson.mockRejectedValue(new Error('down'));
     await request(app).post('/api/plans/current/generate').set(owner.auth);
     const { input } = gemini.generateJson.mock.calls.at(-1)[0];
     const candidateIds = JSON.parse(input.match(/CANDIDATE_EVENTS: (.*)/)[1]).map((c) => c.eventId);
     expect(candidateIds).not.toContain(String(items[0].eventId));
-    expect(input).toContain(`RECENTLY_REMOVED: ${items[0].title}`);
+    expect(input).toContain(`NOT_INTERESTED: ${items[0].title} (Performing & Visual Arts)`);
   });
 
-  test("users can't remove or view each other's activities", async () => {
+  test('other dates of a recurring event are skipped too', async () => {
+    const { owner, items } = await planWithItems();
+    await seedEvent({ title: items[0].title, category: 'Social', startsAt: new Date(Date.now() + 120 * HOUR) });
+    await request(app).post(`/api/plans/items/${items[0].id}/not-interested`).set(owner.auth);
+
+    gemini.generateJson.mockRejectedValue(new Error('down'));
+    await request(app).post('/api/plans/current/generate').set(owner.auth);
+    const { input } = gemini.generateJson.mock.calls.at(-1)[0];
+    const titles = JSON.parse(input.match(/CANDIDATE_EVENTS: (.*)/)[1]).map((c) => c.title);
+    expect(titles).not.toContain(items[0].title);
+  });
+
+  test("users can't change or view each other's activities", async () => {
     const { items } = await planWithItems();
     const stranger = await signUp();
-    expect((await request(app).delete(`/api/plans/items/${items[0].id}`).set(stranger.auth)).statusCode).toBe(404);
-    expect((await request(app).get(`/api/plans/items/${items[0].id}`).set(stranger.auth)).statusCode).toBe(404);
+    const id = items[0].id;
+    expect((await request(app).post(`/api/plans/items/${id}/not-interested`).set(stranger.auth)).statusCode).toBe(404);
+    expect((await request(app).post(`/api/plans/items/${id}/attended`).set(stranger.auth)).statusCode).toBe(404);
+    expect((await request(app).delete(`/api/plans/items/${id}`).set(stranger.auth)).statusCode).toBe(404);
+    expect((await request(app).get(`/api/plans/items/${id}`).set(stranger.auth)).statusCode).toBe(404);
   });
 
   test('bad IDs get a 404', async () => {
     const { auth } = await signUp();
     for (const id of ['abc', '-1', '0', '1.5', '99999']) {
-      expect((await request(app).delete(`/api/plans/items/${id}`).set(auth)).statusCode).toBe(404);
+      expect((await request(app).post(`/api/plans/items/${id}/not-interested`).set(auth)).statusCode).toBe(404);
+      expect((await request(app).post(`/api/plans/items/${id}/attended`).set(auth)).statusCode).toBe(404);
     }
   });
 
@@ -223,6 +283,106 @@ describe('removing an activity (US005)', () => {
   });
 });
 
+describe('marking an activity attended (US012)', () => {
+  async function startedItem(owner, events, item) {
+    // Move the event into the past, as if the user went
+    fakeDb.events.find((e) => e.id === item.eventId).startsAt = new Date(Date.now() - HOUR);
+  }
+
+  test('only after the event has started', async () => {
+    const { owner, items } = await planWithItems();
+    const early = await request(app).post(`/api/plans/items/${items[0].id}/attended`).set(owner.auth);
+    expect(early.statusCode).toBe(400);
+    expect(early.body.message).toMatch(/once it has started/);
+  });
+
+  test('records it, keeps it on the plan, and strengthens the interests it matched', async () => {
+    const owner = await signUp();
+    await request(app).put('/api/interests').set(owner.auth).send({ interests: ['Gardens', 'Museums'] });
+    const events = await seedMixedWeek();
+    gemini.generateJson.mockResolvedValue(geminiPicks(events.slice(0, 4), ['gardens']));
+    const plan = await request(app).post('/api/plans/current/generate').set(owner.auth);
+    const item = plan.body.items[0];
+    expect(item.interests).toEqual(['Gardens']);
+    await startedItem(owner, events, item);
+
+    const res = await request(app).post(`/api/plans/items/${item.id}/attended`).set(owner.auth);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.item).toMatchObject({ status: 'ATTENDED', canMarkAttended: false });
+
+    const weights = Object.fromEntries(fakeDb.interests.map((i) => [i.name, i.weight]));
+    expect(weights).toEqual({ Gardens: 2, Museums: 1 });
+
+    // Marking it twice doesn't count twice
+    await request(app).post(`/api/plans/items/${item.id}/attended`).set(owner.auth);
+    expect(fakeDb.interests.find((i) => i.name === 'Gardens').weight).toBe(2);
+
+    const current = await request(app).get('/api/plans/current').set(owner.auth);
+    expect(current.body.items.find((i) => i.id === item.id).status).toBe('ATTENDED');
+  });
+
+  test('attended events stay on the plan when it is rebuilt, and inform the next prompt', async () => {
+    const { owner, events, items } = await planWithItems();
+    await startedItem(owner, events, items[0]);
+    await request(app).post(`/api/plans/items/${items[0].id}/attended`).set(owner.auth);
+
+    gemini.generateJson.mockRejectedValue(new Error('down'));
+    const res = await request(app).post('/api/plans/current/generate').set(owner.auth);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.items.filter((i) => i.id === items[0].id)).toHaveLength(1);
+    const { input } = gemini.generateJson.mock.calls.at(-1)[0];
+    expect(input).toContain(`ATTENDED: ${items[0].title}`);
+  });
+});
+
+describe('personal reasons', () => {
+  test('the AI is asked to explain each pick in terms of the user’s interests', async () => {
+    const { auth } = await signUp();
+    await request(app).put('/api/interests').set(auth).send({ interests: ['Gardens'], custom: ['chess'] });
+    await seedMixedWeek();
+    gemini.generateJson.mockRejectedValue(new Error('down'));
+    await request(app).post('/api/plans/current/generate').set(auth);
+    const { input, schema } = gemini.generateJson.mock.calls[0][0];
+    expect(input).toContain('We picked this for you because you like');
+    expect(input).toContain('INTERESTS: Gardens, chess');
+    expect(schema.properties.picks.items.required).toContain('matchedInterests');
+  });
+
+  test('interests the AI names that the user doesn’t have are dropped', async () => {
+    const { auth } = await signUp();
+    await request(app).put('/api/interests').set(auth).send({ interests: ['Gardens'] });
+    const events = await seedMixedWeek();
+    gemini.generateJson.mockResolvedValue(geminiPicks(events.slice(2, 6), ['Gardens', 'skydiving']));
+    const res = await request(app).post('/api/plans/current/generate').set(auth);
+    expect(res.body.items.every((i) => i.interests.join() === 'Gardens')).toBe(true);
+  });
+
+  test('the rules fallback still writes a personal reason that names the interest', async () => {
+    const { auth } = await signUp();
+    await request(app).put('/api/interests').set(auth).send({ interests: ['Gardens', 'Live music'], custom: ['chess'] });
+    await seedMixedWeek();
+    gemini.generateJson.mockRejectedValue(new Error('down'));
+    const res = await request(app).post('/api/plans/current/generate').set(auth);
+    const byTitle = Object.fromEntries(res.body.items.map((i) => [i.title, i]));
+
+    expect(byTitle['Garden sketching walk'].reason).toBe(
+      'We picked this for you because you like gardens. It’s at Somewhere in Manhattan.'.replace('’', "'")
+    );
+    expect(byTitle['Jazz night'].reason).toMatch(/because you like live music/);
+    expect(byTitle['Chess in the park'].reason).toMatch(/because you like chess/);
+    expect(byTitle['Garden sketching walk'].interests).toEqual(['Gardens']);
+  });
+
+  test('without a matching interest, the reason builds on what they attended', async () => {
+    const history = [{ status: 'ATTENDED', event: { title: 'Sunday jazz brunch', eventCategory: 'Music' } }];
+    const event = { title: 'Choir evening', category: 'Social', eventCategory: 'Music', startsAt: new Date() };
+    expect(planner.personalReason(event, [], history)).toBe(
+      'You went to "Sunday jazz brunch", so we think you\'ll enjoy this music event too.'
+    );
+    expect(planner.personalReason({ ...event, eventCategory: 'Other' }, [], history)).toMatch(/round out your week/);
+  });
+});
+
 describe('validatePicks', () => {
   const candidates = new Map([['1', { id: 1 }], ['2', { id: 2 }], ['3', { id: 3 }]]);
   const pick = (id) => ({ eventId: id, reason: 'x' });
@@ -230,10 +390,58 @@ describe('validatePicks', () => {
   test('accepts valid picks', () => {
     expect(planner.validatePicks({ picks: [pick('1'), pick('2'), pick('3')] }, candidates, 3)).toHaveLength(3);
   });
+  test('allows up to 7', () => {
+    const many = new Map([...Array(8)].map((_, i) => [String(i + 1), { id: i + 1, title: 'x' }]));
+    const picks = (n) => ({ picks: [...Array(n)].map((_, i) => pick(String(i + 1))) });
+    expect(planner.validatePicks(picks(7), many, 4)).toHaveLength(7);
+    expect(planner.validatePicks(picks(8), many, 4)).toBeNull();
+  });
   test('rejects duplicates, unknown IDs and wrong counts', () => {
     expect(planner.validatePicks({ picks: [pick('1'), pick('1'), pick('2')] }, candidates, 3)).toBeNull();
     expect(planner.validatePicks({ picks: [pick('1'), pick('2'), pick('7')] }, candidates, 3)).toBeNull();
     expect(planner.validatePicks({ picks: [pick('1')] }, candidates, 3)).toBeNull();
     expect(planner.validatePicks({ nope: true }, candidates, 3)).toBeNull();
+  });
+});
+
+describe('personalizeReason', () => {
+  const { personalizeReason } = require('../src/services/interests');
+  test('lowercases interest chips inside sentences', () => {
+    expect(personalizeReason('We picked this for you because you like Live music and Book clubs.', ['Live music'])).toBe(
+      'We picked this for you because you like live music and book clubs.'
+    );
+  });
+  test('adds the "because you like" opening when the AI left it out', () => {
+    expect(personalizeReason('A creative evening in Brooklyn.', ['Museums'])).toBe(
+      'We picked this for you because you like museums. A creative evening in Brooklyn.'
+    );
+  });
+  test('leaves reasons for unmatched events alone', () => {
+    expect(personalizeReason('Something new for your week.', [])).toBe('Something new for your week.');
+  });
+});
+
+describe('when the AI picks too few', () => {
+  test('keeps its picks and reasons, and tops the plan up to 4 by rules', async () => {
+    const { auth } = await signUp();
+    const events = await seedMixedWeek();
+    gemini.generateJson.mockResolvedValue(geminiPicks(events.slice(0, 2)));
+    const res = await request(app).post('/api/plans/current/generate').set(auth);
+
+    expect(gemini.generateJson).toHaveBeenCalledTimes(1);
+    expect(res.body.source).toBe('ai');
+    expect(res.body.items).toHaveLength(4);
+    const reasons = res.body.items.map((i) => i.reason);
+    expect(reasons).toContain('Because Broadway backstage tour');
+    expect(reasons).toContain('Because Garden sketching walk');
+    expect(new Set(res.body.items.map((i) => i.eventId)).size).toBe(4);
+  });
+
+  test('an invented event still rejects the whole answer', async () => {
+    const { auth } = await signUp();
+    const events = await seedMixedWeek();
+    gemini.generateJson.mockResolvedValue({ picks: [...geminiPicks(events.slice(0, 4)).picks, { eventId: '99999', matchedInterests: [], reason: 'x' }] });
+    const res = await request(app).post('/api/plans/current/generate').set(auth);
+    expect(res.body.source).toBe('rules');
   });
 });

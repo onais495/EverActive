@@ -1,4 +1,5 @@
-const { ACTIVITY_TYPES, INTEREST_OPTIONS, METRO_AREAS } = require('./constants');
+const { ACTIVITY_TYPES, INTEREST_OPTIONS, METRO_AREAS, EVENT_CATEGORIES } = require('./constants');
+const { extractCalendarId, isCityFeed } = require('./services/luma');
 
 const EMAIL_PATTERN =/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -164,26 +165,91 @@ function validatePreferences(body) {
 }
 
 const EVENTBRITE_ID_PATTERN = /^\d{1,20}$/;
+const PROVIDERS = ['EVENTBRITE', 'LUMA'];
 
-// Body: { name, defaultCategory, venueId? , eventId? } — one of the two IDs is required
+function eventCategoryError(value, required) {
+  if (value === undefined || value === null) return required ? 'Please choose an eventCategory for this source.' : null;
+  return EVENT_CATEGORIES.includes(value) ? null : `eventCategory must be one of: ${EVENT_CATEGORIES.join(', ')}.`;
+}
+
+// Body: { provider?, name, defaultCategory, defaultEventCategory?, aiScreened?, ... }
+//   Eventbrite (default): eventId (any event there) or venueId
+//   Luma: calendar (a calendar ID cal-..., a city feed ID discplace-..., or the iCal subscription link)
+//   aiScreened: the AI decides which events suit our users and sets their categories. Always on for
+//   Luma city feeds. Without it, defaultCategory is required, and for Luma defaultEventCategory too
+//   (Luma feeds don't include categories).
 function validateEventSource(body) {
-  const { name, defaultCategory, venueId, eventId } = body;
-  const errors = [];
+  const { provider = 'EVENTBRITE', name, defaultCategory, defaultEventCategory, venueId, eventId, calendar } = body;
+  if (!PROVIDERS.includes(provider)) return { errors: [`provider must be one of: ${PROVIDERS.join(', ')}.`] };
+  if (body.aiScreened !== undefined && typeof body.aiScreened !== 'boolean') {
+    return { errors: ['aiScreened must be true or false.'] };
+  }
 
+  const calendarId = provider === 'LUMA' ? extractCalendarId(calendar) : null;
+  const aiScreened = Boolean(body.aiScreened || (calendarId && isCityFeed(calendarId)));
+
+  const errors = [];
   if (!isNonEmptyString(name) || name.trim().length > 100) errors.push('Please give the source a name.');
-  if (!ACTIVITY_TYPES.includes(defaultCategory)) {
+  // Screened sources get each event's type from the AI; the default is only a placeholder
+  if (!(aiScreened && defaultCategory === undefined) && !ACTIVITY_TYPES.includes(defaultCategory)) {
     errors.push(`Category must be one of: ${ACTIVITY_TYPES.join(', ')}.`);
   }
-  const venue = venueId === undefined ? undefined : String(venueId);
-  const sampleEventId = eventId === undefined ? undefined : String(eventId);
-  if ((venue === undefined) === (sampleEventId === undefined)) {
-    errors.push('Provide either venueId or eventId.');
-  } else if (!EVENTBRITE_ID_PATTERN.test(venue ?? sampleEventId)) {
-    errors.push('Eventbrite IDs are numbers only.');
+  const categoryError = eventCategoryError(defaultEventCategory, provider === 'LUMA' && !aiScreened);
+  if (categoryError) errors.push(categoryError);
+
+  const data = {
+    provider,
+    defaultCategory: defaultCategory ?? 'Social',
+    defaultEventCategory: defaultEventCategory ?? null,
+    aiScreened,
+  };
+
+  if (provider === 'LUMA') {
+    data.calendarId = calendarId;
+    if (!data.calendarId) {
+      errors.push('Paste the Luma calendar ID (cal-...), city feed ID (discplace-...) or its iCal subscription link.');
+    }
+  } else {
+    const venue = venueId === undefined ? undefined : String(venueId);
+    const sampleEventId = eventId === undefined ? undefined : String(eventId);
+    if ((venue === undefined) === (sampleEventId === undefined)) {
+      errors.push('Provide either venueId or eventId.');
+    } else if (!EVENTBRITE_ID_PATTERN.test(venue ?? sampleEventId)) {
+      errors.push('Eventbrite IDs are numbers only.');
+    }
+    data.venueId = venue;
+    data.eventId = sampleEventId;
   }
 
   if (errors.length > 0) return { errors };
-  return { data: { name: name.trim(), defaultCategory, venueId: venue, eventId: sampleEventId } };
+  return { data: { ...data, name: name.trim() } };
+}
+
+// Body for PATCH: any of { isActive, defaultCategory, defaultEventCategory (null clears it) }
+function validateEventSourceUpdate(body) {
+  const { isActive, defaultCategory, defaultEventCategory } = body;
+  const errors = [];
+  const data = {};
+
+  if (isActive !== undefined) {
+    if (typeof isActive !== 'boolean') errors.push('isActive must be true or false.');
+    else data.isActive = isActive;
+  }
+  if (defaultCategory !== undefined) {
+    if (!ACTIVITY_TYPES.includes(defaultCategory)) errors.push(`Category must be one of: ${ACTIVITY_TYPES.join(', ')}.`);
+    else data.defaultCategory = defaultCategory;
+  }
+  if (defaultEventCategory !== undefined) {
+    const error = defaultEventCategory === null ? null : eventCategoryError(defaultEventCategory, false);
+    if (error) errors.push(error);
+    else data.defaultEventCategory = defaultEventCategory;
+  }
+
+  if (errors.length > 0) return { errors };
+  if (Object.keys(data).length === 0) {
+    return { errors: ['Send isActive, defaultCategory or defaultEventCategory.'] };
+  }
+  return { data };
 }
 
 module.exports = {
@@ -191,5 +257,7 @@ module.exports = {
   validateInterests,
   validatePreferences,
   validateEventSource,
+  validateEventSourceUpdate,
+  passwordError,
   normalizeEmail,
 };

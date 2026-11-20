@@ -27,18 +27,22 @@ async function seedEvent(overrides = {}) {
   eventCount++;
   return fakeDb.event.create({
     data: {
-      eventbriteId: `eb-${eventCount}`,
+      provider: 'EVENTBRITE',
+      externalId: `eb-${eventCount}`,
       sourceId: 1,
       title: `Event ${eventCount}`,
       description: 'An event in the city.',
       url: `https://www.eventbrite.com/e/${eventCount}`,
-      startsAt: new Date(Date.now() + (24 + eventCount) * HOUR),
+      // 10 minutes apart, so hundreds of events across a test run all stay inside the 7-day plan window
+      startsAt: new Date(Date.now() + 24 * HOUR + eventCount * 10 * 60 * 1000),
       endsAt: null,
       venueName: 'Somewhere in Manhattan',
       address: '1 Main St, New York, NY',
       latitude: 40.75,
       longitude: -73.98,
+      isFree: false,
       category: 'Social',
+      eventCategory: null,
       metroArea: 'NYC',
       ...overrides,
     },

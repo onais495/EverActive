@@ -1,11 +1,19 @@
 // In-memory stand-in for the Prisma client, so tests run without MySQL.
 // Supports the subset of Prisma the app uses: simple where filters (equals, in, not, gt/gte/lt/lte),
-// orderBy on one field, select, include of one-to-one relations, and unique constraints.
+// compound unique keys (e.g. provider_externalId), orderBy on one field, select, include of
+// one-to-one relations, groupBy with _count, and unique constraints.
 
 // Per model: default column values, unique columns (or column groups), and relations for `include`
 const MODELS = {
   user: {
-    defaults: () => ({ role: 'USER', isActive: true, metroArea: 'NYC', activityTypes: null, createdAt: new Date() }),
+    defaults: () => ({
+      role: 'USER',
+      isActive: true,
+      metroArea: 'NYC',
+      activityTypes: null,
+      emailVerifiedAt: null,
+      createdAt: new Date(),
+    }),
     unique: [['email']],
   },
   session: {
@@ -19,24 +27,47 @@ const MODELS = {
   },
   eventSource: {
     defaults: () => ({
+      provider: 'EVENTBRITE',
       isActive: true,
+      aiScreened: false,
       metroArea: 'NYC',
-      eventbriteOrganizerId: null,
+      organizerId: null,
+      defaultEventCategory: null,
       lastSyncedAt: null,
       createdAt: new Date(),
     }),
-    unique: [['eventbriteVenueId', 'eventbriteOrganizerId']],
+    unique: [['provider', 'externalId', 'organizerId']],
   },
   event: {
-    defaults: () => ({ description: '', isFree: false, metroArea: 'NYC', createdAt: new Date() }),
-    unique: [['eventbriteId']],
+    defaults: () => ({
+      provider: 'EVENTBRITE',
+      description: '',
+      isFree: null,
+      eventCategory: null,
+      isSuitable: true,
+      screenedAt: null,
+      metroArea: 'NYC',
+      createdAt: new Date(),
+    }),
+    unique: [['provider', 'externalId']],
   },
   planItem: {
-    defaults: () => ({ status: 'SUGGESTED', reason: '', removedAt: null, createdAt: new Date() }),
+    defaults: () => ({
+      status: 'SUGGESTED',
+      reason: '',
+      matchedInterests: null,
+      respondedAt: null,
+      createdAt: new Date(),
+    }),
     unique: [['userId', 'eventId', 'weekStart']],
     relations: { event: { model: 'event', foreignKey: 'eventId' } },
   },
+  emailCode: {
+    defaults: () => ({ attempts: 0, createdAt: new Date() }),
+  },
 };
+
+const OPERATORS = new Set(['equals', 'in', 'not', 'gt', 'gte', 'lt', 'lte']);
 
 let tables;
 let nextId;
@@ -68,8 +99,18 @@ function matchesCondition(value, condition) {
   });
 }
 
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !(value instanceof Date) && !Array.isArray(value);
+}
+
 function matches(row, where = {}) {
-  return Object.entries(where).every(([key, condition]) => matchesCondition(row[key], condition));
+  return Object.entries(where).every(([key, condition]) => {
+    // Compound unique key, e.g. { provider_externalId: { provider, externalId } }
+    if (!(key in row) && isPlainObject(condition) && !Object.keys(condition).some((k) => OPERATORS.has(k))) {
+      return matches(row, condition);
+    }
+    return matchesCondition(row[key], condition);
+  });
 }
 
 function uniqueError() {
@@ -163,6 +204,16 @@ function model(name) {
       if (row) return this.update({ where: { id: row.id }, data: update });
       return this.create({ data: create });
     },
+    // Only what the app uses: by one or more fields, with _count: { _all: true }
+    async groupBy({ by, where }) {
+      const groups = new Map();
+      for (const row of tables[name].filter((r) => matches(r, where))) {
+        const key = JSON.stringify(by.map((field) => row[field] ?? null));
+        if (!groups.has(key)) groups.set(key, { ...Object.fromEntries(by.map((f) => [f, row[f] ?? null])), _count: { _all: 0 } });
+        groups.get(key)._count._all++;
+      }
+      return [...groups.values()];
+    },
     async deleteMany({ where } = {}) {
       const before = tables[name].length;
       tables[name] = tables[name].filter((r) => !matches(r, where));
@@ -180,6 +231,7 @@ const fakeDb = {
   get eventSources() { return tables.eventSource; },
   get events() { return tables.event; },
   get planItems() { return tables.planItem; },
+  get emailCodes() { return tables.emailCode; },
 
   // Array form: the operations have already run by the time they're awaited here
   async $transaction(operations) {
