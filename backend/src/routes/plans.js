@@ -56,4 +56,30 @@ router.post('/items/:id/attended', async (req, res) => {
   res.json({ message: 'Thanks! We’ll suggest more like this.', item: await planner.getPlanItem(req.user, id) });
 });
 
+// POST /api/plans/items/:id/skipped (US012): the event happened and the user didn't go
+router.post('/items/:id/skipped', async (req, res) => {
+  const id = parseId(req.params.id);
+  const result = id && (await planner.markSkipped(req.user, id));
+  if (!result || result.error === 'not_found') return res.status(404).json(NOT_FOUND);
+  if (result.error === 'not_started') {
+    return res.status(400).json({ message: 'You can mark this once it has started.' });
+  }
+  res.json({ message: 'Thanks for letting us know.', item: await planner.getPlanItem(req.user, id) });
+});
+
+// PUT /api/plans/items/:id/rating (US012): { rating: 1-5 } for an activity the user attended
+router.put('/items/:id/rating', async (req, res) => {
+  const id = parseId(req.params.id);
+  const { rating } = req.body || {};
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return res.status(400).json({ message: 'Please choose a rating from 1 to 5 stars.' });
+  }
+  const result = id && (await planner.rateItem(req.user, id, rating));
+  if (!result || result.error === 'not_found') return res.status(404).json(NOT_FOUND);
+  if (result.error === 'not_attended') {
+    return res.status(400).json({ message: 'You can rate an activity after marking that you went.' });
+  }
+  res.json({ message: 'Thanks for the rating!', item: await planner.getPlanItem(req.user, id) });
+});
+
 module.exports = router;

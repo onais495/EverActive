@@ -25,6 +25,11 @@ enum PlanItemStatus {
   SUGGESTED
   NOT_INTERESTED
   ATTENDED
+  SKIPPED // the event happened and the user didn't go
+}
+
+enum NudgeKind {
+  SOCIAL_GAP // no social activity attended for a while
 }
 
 // Where a source's events come from
@@ -39,22 +44,26 @@ enum EmailCodePurpose {
 }
 
 model User {
-  id              Int         @id @default(autoincrement())
-  nameFirst       String      @db.VarChar(50)
-  nameLast        String      @db.VarChar(50)
-  dateBirth       DateTime    @db.Date
-  email           String      @unique @db.VarChar(255)
-  password        String      @db.VarChar(255) // bcrypt hash
-  role            Role        @default(USER)
-  isActive        Boolean     @default(true)
-  metroArea       String      @default("NYC") @db.VarChar(20)
-  activityTypes   Json? // e.g. ["Social","Intellectual"]; null = all three
-  emailVerifiedAt DateTime? // null until the user enters the code from the confirmation email
-  createdAt       DateTime    @default(now())
-  sessions        Session[]
-  interests       Interest[]
-  planItems       PlanItem[]
-  emailCodes      EmailCode[]
+  id               Int         @id @default(autoincrement())
+  nameFirst        String      @db.VarChar(50)
+  nameLast         String      @db.VarChar(50)
+  dateBirth        DateTime    @db.Date
+  email            String      @unique @db.VarChar(255)
+  password         String      @db.VarChar(255) // bcrypt hash
+  role             Role        @default(USER)
+  isActive         Boolean     @default(true)
+  metroArea        String      @default("NYC") @db.VarChar(20)
+  activityTypes    Json? // e.g. ["Social","Intellectual"]; null = all three
+  emailVerifiedAt  DateTime? // null until the user enters the code from the confirmation email
+  nudgeEmails      Boolean     @default(true) // user can turn nudge emails off
+  unsubscribeToken String?     @unique @db.VarChar(64) // for the one-tap "stop these emails" link
+  createdAt        DateTime    @default(now())
+  sessions         Session[]
+  interests        Interest[]
+  planItems        PlanItem[]
+  emailCodes       EmailCode[]
+  nudges           Nudge[]
+  devices          Device[]
 }
 
 model Session {
@@ -138,6 +147,7 @@ model PlanItem {
   reason           String         @db.VarChar(255)
   matchedInterests Json? // the user's interests this event was picked for, e.g. ["Gardens"]
   status           PlanItemStatus @default(SUGGESTED)
+  rating           Int? // 1-5, only for attended activities
   respondedAt      DateTime? // when the user marked it not interested or attended
   createdAt        DateTime       @default(now())
 
@@ -157,4 +167,34 @@ model EmailCode {
   createdAt DateTime         @default(now())
 
   @@index([userId, purpose])
+}
+
+// A reminder to get out (US009). Shown in the app, and also emailed / pushed when possible.
+model Nudge {
+  id          Int       @id @default(autoincrement())
+  userId      Int
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind        NudgeKind
+  message     String    @db.VarChar(500)
+  eventIds    Json // suggested event IDs, e.g. [12, 40]
+  emailedAt   DateTime?
+  pushedAt    DateTime?
+  seenAt      DateTime?
+  dismissedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// A phone that can receive push notifications (Expo push token)
+model Device {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pushToken String   @unique @db.VarChar(200)
+  platform  String   @db.VarChar(10) // "ios" or "android"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
 }

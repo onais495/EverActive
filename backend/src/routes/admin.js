@@ -6,6 +6,8 @@ const eventbrite = require('../services/eventbrite');
 const luma = require('../services/luma');
 const { runSync } = require('../services/eventSync');
 const { getAdminStats } = require('../services/stats');
+const { runNudges } = require('../services/nudges');
+const { destroyUserSessions } = require('../services/sessions');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('ADMIN'));
@@ -18,6 +20,43 @@ function parseId(value) {
 // GET /api/admin/stats: grouped numbers for the Admin Dashboard. Never lists or identifies users.
 router.get('/stats', async (req, res) => {
   res.json(await getAdminStats());
+});
+
+// GET /api/admin/users?page=1 (US011): account management. Names and emails only: never interests,
+// plans or activity history (SRS 4.2).
+const USERS_PER_PAGE = 50;
+router.get('/users', async (req, res) => {
+  const page = Math.max(1, parseId(req.query.page) || 1);
+  const [users, total] = await Promise.all([
+    prisma.user.findMany({
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * USERS_PER_PAGE,
+      take: USERS_PER_PAGE,
+      select: { id: true, nameFirst: true, nameLast: true, email: true, role: true, isActive: true, createdAt: true },
+    }),
+    prisma.user.count(),
+  ]);
+  res.json({ users, page, pageSize: USERS_PER_PAGE, total });
+});
+
+// PATCH /api/admin/users/:id { isActive: false } (US011): deactivate (or reactivate) an account.
+// Deactivating logs the user out everywhere; nothing is deleted.
+router.patch('/users/:id', async (req, res) => {
+  const id = parseId(req.params.id);
+  const { isActive } = req.body || {};
+  if (!id) return res.status(404).json({ message: 'User not found.' });
+  if (typeof isActive !== 'boolean') return res.status(400).json({ message: 'Send isActive: true or false.' });
+  if (id === req.user.id && !isActive) return res.status(400).json({ message: 'You can’t deactivate your own account.' });
+
+  const { count } = await prisma.user.updateMany({ where: { id }, data: { isActive } });
+  if (count === 0) return res.status(404).json({ message: 'User not found.' });
+  if (!isActive) await destroyUserSessions(id);
+  res.json({ message: isActive ? 'Account reactivated.' : 'Account deactivated and logged out.' });
+});
+
+// POST /api/admin/nudges/run: send today's reminders now instead of waiting for the daily job
+router.post('/nudges/run', async (req, res) => {
+  res.json({ summary: await runNudges() });
 });
 
 // GET /api/admin/event-sources: the curated Eventbrite venues and Luma calendars

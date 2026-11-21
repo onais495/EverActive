@@ -139,9 +139,9 @@ function validateInterests(body) {
   return { data: [...chosen.values()] };
 }
 
-// Body: { metroArea?: 'NYC', activityTypes?: ['Solo', 'Social'] }
+// Body: { metroArea?: 'NYC', activityTypes?: ['Solo', 'Social'], nudgeEmails?: true }
 function validatePreferences(body) {
-  const { metroArea, activityTypes } = body;
+  const { metroArea, activityTypes, nudgeEmails } = body;
   const errors = [];
   const data = {};
 
@@ -157,6 +157,11 @@ function validatePreferences(body) {
       activityTypes.every((t) => ACTIVITY_TYPES.includes(t));
     if (!valid) errors.push(`Please choose at least one of: ${ACTIVITY_TYPES.join(', ')}.`);
     else data.activityTypes = [...new Set(activityTypes)];
+  }
+
+  if (nudgeEmails !== undefined) {
+    if (typeof nudgeEmails !== 'boolean') errors.push('nudgeEmails must be true or false.');
+    else data.nudgeEmails = nudgeEmails;
   }
 
   if (errors.length > 0) return { errors };
